@@ -11,12 +11,14 @@ namespace core {
 /**
  * @brief Costruttore della DriverInterface.
  */
-    DriverInterface::DriverInterface(std::shared_ptr<PrinterInterface> printer)
-            : printer_(std::move(printer)), commandContext_(std::make_unique<CommandContext>()),
-              currentState_(PrintState::Idle) {
-    }
-
-/**
+    DriverInterface::DriverInterface(std::shared_ptr<Printer> printer, std::shared_ptr<SerialPort> serialPort)
+            : printer_(std::move(printer)),
+              serialPort_(std::move(serialPort)),
+              commandContext_(std::make_shared<CommandContext>()),
+              commandExecutor_(std::make_shared<CommandExecutor>(serialPort_, commandContext_)),
+              currentState_(PrintState::Idle) {}
+              
+    /**
  * @brief Esegue un movimento sugli assi X, Y, Z con feedrate specificato.
  */
     types::Result DriverInterface::moveTo(float x, float y, float z, float feedrate) {
@@ -105,8 +107,15 @@ namespace core {
             return {types::ResultCode::Error, "Failed to send command."};
         }
 
-        currentState_ = PrintState::Running;
-        return {types::ResultCode::Success, "Command sent."};
+        auto result = commandExecutor_->sendCommandAndAwaitResponse(command, cmdNum);
+
+        if (result.isSuccess()) {
+            currentState_ = PrintState::Running;
+        } else {
+            currentState_ = PrintState::Error;
+        }
+
+        return result;
     }
 
 } // namespace core

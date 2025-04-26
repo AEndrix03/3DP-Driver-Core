@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include "SerialPort.hpp"
+#include "core/serial/SerialPort.hpp"
 #include "CommandContext.hpp"
 #include "types/Result.hpp"
 #include <memory>

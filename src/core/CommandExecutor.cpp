@@ -12,7 +12,8 @@ namespace core {
  * @brief Costruttore di CommandExecutor.
  */
     CommandExecutor::CommandExecutor(std::shared_ptr<SerialPort> serial, std::shared_ptr<CommandContext> context)
-            : serial_(std::move(serial)), context_(std::move(context)) {}
+            : serial_(std::move(serial)), context_(std::move(context)) {
+    }
 
 /**
  * @brief Invia il comando e aspetta un ACK o un ERR.

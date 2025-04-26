@@ -5,9 +5,10 @@
 #pragma once
 
 #include "CommandContext.hpp"
-#include "PrintState.hpp"
-#include "PrinterInterface.hpp"
+#include "core/printer/PrintState.hpp"
+#include "core/printer/Printer.hpp"
 #include "types/Result.hpp"
+#include "CommandExecutor.hpp"
 #include <memory>
 #include <vector>
 
@@ -20,9 +21,9 @@ namespace core {
     public:
         /**
          * @brief Costruttore.
-         * @param printer Oggetto che implementa PrinterInterface.
+         * @param printer Oggetto che implementa Printer.
          */
-        explicit DriverInterface(std::shared_ptr<PrinterInterface> printer);
+        explicit DriverInterface(std::shared_ptr<Printer> printer, std::shared_ptr<SerialPort> serialPort);
 
         /**
          * @brief Movimento sugli assi X, Y, Z con feedrate specificato.
@@ -65,8 +66,10 @@ namespace core {
         PrintState getState() const;
 
     private:
-        std::shared_ptr<PrinterInterface> printer_;
-        std::unique_ptr<CommandContext> commandContext_;
+        std::shared_ptr<Printer> printer_;
+        std::shared_ptr<SerialPort> serialPort_;
+        std::shared_ptr<CommandContext> commandContext_;
+        std::shared_ptr<CommandExecutor> commandExecutor_;
         PrintState currentState_;
 
         types::Result sendCommandInternal(char category, int code, const std::vector<std::string> &params);

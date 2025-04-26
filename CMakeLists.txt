@@ -5,7 +5,14 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include_directories(include)
+include_directories(external/serial/include)
 
-add_executable(3DP_Driver_Core
-    src/main.cpp
+file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS src/*.cpp)
+add_executable(3DP_Driver_Core ${SOURCES}
+        external/serial/src/serial.cc
+        external/serial/src/impl/win.cc)
+
+
+target_sources(3DP_Driver_Core PRIVATE
+        external/serial/src/serial.cc
 )

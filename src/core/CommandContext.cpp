@@ -10,7 +10,7 @@ namespace core {
  * @brief Inizializza il contesto con il primo numero comando a 0.
  */
     CommandContext::CommandContext()
-            : currentNumber_(0) {}
+            : currentNumber_(1) {}
 
 /**
  * @brief Ottiene il prossimo numero di comando, incrementando il contatore.
