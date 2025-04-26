@@ -4,6 +4,7 @@
 
 #include "core/CommandExecutor.hpp"
 #include "core/types/Error.hpp"
+#include "core/logger/Logger.hpp"
 #include <sstream>
 
 namespace core {
@@ -50,6 +51,9 @@ namespace core {
                 receivedNumber = std::stoi(token.substr(1));
             }
             if (receivedNumber != expectedNumber) {
+                std::stringstream ss;
+                ss << "ACK number mismatch: Received: " << receivedNumber << " Expected>: " << expectedNumber;
+                Logger::logError(ss.str());
                 throw types::DriverException("ACK number mismatch");
             }
             return {types::ResultCode::Success, "Command acknowledged."};
@@ -63,18 +67,23 @@ namespace core {
 
         if (token == "RESEND") {
             int requestedNumber = 0;
-            iss >> token; // N<num>
+            iss >> token;
             if (token[0] == 'N') {
                 requestedNumber = std::stoi(token.substr(1));
             }
+
             std::string resendCommand = context_->getCommandText(requestedNumber);
             if (resendCommand.empty()) {
+                Logger::logError("[RESEND] FAILED: EMPTY RESEND REQUEST");
                 throw types::ResendFailedException();
             }
+
+            Logger::logWarning("[RESEND] Resending command N" + std::to_string(requestedNumber));
+
             serial_->send(resendCommand);
-            // Dopo RESEND dobbiamo aspettare nuova risposta
             return sendCommandAndAwaitResponse(resendCommand, requestedNumber);
         }
+
 
         return {types::ResultCode::Error, "Unknown response."};
     }
