@@ -22,6 +22,8 @@ namespace core {
 
         std::string receiveLine() override;
 
+        bool isOpen() const override;
+
     private:
         std::unique_ptr<serial::Serial> serial_;
     };

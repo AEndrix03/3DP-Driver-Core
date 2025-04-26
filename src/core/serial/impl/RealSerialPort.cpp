@@ -37,5 +37,8 @@ namespace core {
         return "";
     }
 
-
+    bool RealSerialPort::isOpen() const {
+        return serial_ && serial_->isOpen();
+    }
+    
 } // namespace core

@@ -26,6 +26,8 @@ namespace core {
          * @return Stringa ricevuta.
          */
         virtual std::string receiveLine() = 0;
+
+        virtual bool isOpen() const = 0;
     };
 
 } // namespace core
