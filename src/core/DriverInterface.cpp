@@ -55,7 +55,7 @@ namespace core {
 
         if (result.isSuccess()) {
             currentState_ = PrintState::Running;
-        } else {
+        } else if (result.isError()) {
             currentState_ = PrintState::Error;
         }
 
