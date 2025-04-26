@@ -1,0 +1,13 @@
+{
+  "category": "F",
+  "description": "Fan controller",
+  "commands": [
+    {
+      "code": 10,
+      "name": "Set Fan Speed",
+      "params": [
+        "S"
+      ]
+    }
+  ]
+}

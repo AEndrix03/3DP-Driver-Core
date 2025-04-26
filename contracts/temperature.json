@@ -1,0 +1,18 @@
+{
+  "category": "T",
+  "description": "Temperature controller",
+  "commands": [
+    {
+      "code": 10,
+      "name": "Set Temperature",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "code": 20,
+      "name": "Get Temperature",
+      "params": []
+    }
+  ]
+}

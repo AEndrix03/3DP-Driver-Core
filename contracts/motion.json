@@ -1,0 +1,29 @@
+{
+  "category": "M",
+  "description": "Motion controller",
+  "commands": [
+    {
+      "code": 0,
+      "name": "Emergency Stop",
+      "params": []
+    },
+    {
+      "code": 10,
+      "name": "Move To",
+      "params": [
+        "X",
+        "Y",
+        "Z",
+        "F"
+      ]
+    },
+    {
+      "code": 99,
+      "name": "Diagnose Axis",
+      "params": [
+        "X|Y|Z",
+        "F"
+      ]
+    }
+  ]
+}

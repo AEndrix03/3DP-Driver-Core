@@ -1,0 +1,41 @@
+{
+  "category": "S",
+  "description": "System control",
+  "commands": [
+    {
+      "code": 0,
+      "name": "Homing",
+      "params": []
+    },
+    {
+      "code": 1,
+      "name": "Start Print",
+      "params": []
+    },
+    {
+      "code": 2,
+      "name": "Pause",
+      "params": []
+    },
+    {
+      "code": 3,
+      "name": "Resume",
+      "params": []
+    },
+    {
+      "code": 4,
+      "name": "Emergency Reset",
+      "params": []
+    },
+    {
+      "code": 5,
+      "name": "Brutal Reset",
+      "params": []
+    },
+    {
+      "code": 10,
+      "name": "Print Status",
+      "params": []
+    }
+  ]
+}

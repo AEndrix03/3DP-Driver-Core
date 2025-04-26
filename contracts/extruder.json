@@ -1,0 +1,55 @@
+{
+  "category": "A",
+  "description": "Extruder control",
+  "commands": [
+    {
+      "code": 0,
+      "name": "Emergency Stop",
+      "params": []
+    },
+    {
+      "code": 10,
+      "name": "Extrude",
+      "params": [
+        "E",
+        "F"
+      ]
+    },
+    {
+      "code": 11,
+      "name": "Retract",
+      "params": [
+        "E",
+        "F"
+      ]
+    },
+    {
+      "code": 12,
+      "name": "Purge",
+      "params": [
+        "E",
+        "F"
+      ]
+    },
+    {
+      "code": 13,
+      "name": "Step Manual",
+      "params": [
+        "S",
+        "D"
+      ]
+    },
+    {
+      "code": 14,
+      "name": "Reset Position",
+      "params": []
+    },
+    {
+      "code": 15,
+      "name": "Set Steps per mm",
+      "params": [
+        "S"
+      ]
+    }
+  ]
+}

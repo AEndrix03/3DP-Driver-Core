@@ -25,28 +25,13 @@ int main() {
         printer->initialize();
 
         // MOVE TO
-        auto moveResult = driver.moveTo(10.0f, 20.0f, 5.0f, 1500.0f);
+        auto moveResult = driver.motion()->moveTo(10.0f, 20.0f, 5.0f, 1500.0f);
         if (moveResult.isSuccess()) {
             std::cout << "[Driver] Move command success!" << std::endl;
         } else {
             std::cerr << "[Driver] Move failed: " << moveResult.message << std::endl;
         }
 
-        // EXTRUDE
-        auto extrudeResult = driver.extrude(20.0f, 1000.0f);
-        if (extrudeResult.isSuccess()) {
-            std::cout << "[Driver] Extrude command success!" << std::endl;
-        } else {
-            std::cerr << "[Driver] Extrude failed: " << extrudeResult.message << std::endl;
-        }
-
-        // HOME
-        auto homeResult = driver.homeAxes();
-        if (homeResult.isSuccess()) {
-            std::cout << "[Driver] Home command success!" << std::endl;
-        } else {
-            std::cerr << "[Driver] Home failed: " << homeResult.message << std::endl;
-        }
 
         // Shutdown (non obbligatorio per ora)
         printer->shutdown();

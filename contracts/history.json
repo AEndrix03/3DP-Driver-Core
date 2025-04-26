@@ -1,0 +1,28 @@
+{
+  "category": "H",
+  "description": "Command history",
+  "commands": [
+    {
+      "code": 10,
+      "name": "Print History",
+      "params": []
+    },
+    {
+      "code": 20,
+      "name": "Resend Command",
+      "params": [
+        "N"
+      ]
+    },
+    {
+      "code": 30,
+      "name": "Clear History",
+      "params": []
+    },
+    {
+      "code": 40,
+      "name": "Last Command Number",
+      "params": []
+    }
+  ]
+}

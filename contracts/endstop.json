@@ -1,0 +1,11 @@
+{
+  "category": "E",
+  "description": "Endstop diagnostics",
+  "commands": [
+    {
+      "code": 10,
+      "name": "Read Endstop Status",
+      "params": []
+    }
+  ]
+}

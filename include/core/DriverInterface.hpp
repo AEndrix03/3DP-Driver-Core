@@ -7,8 +7,11 @@
 #include "CommandContext.hpp"
 #include "core/printer/PrintState.hpp"
 #include "core/printer/Printer.hpp"
-#include "types/Result.hpp"
-#include "CommandExecutor.hpp"
+#include "core/command/motion/MotionCommands.hpp"
+#include "core/command/extruder/ExtruderCommands.hpp"
+#include "core/command/fan/FanCommands.hpp"
+#include "core/command/system/SystemCommands.hpp"
+#include "core/CommandExecutor.hpp"
 #include <memory>
 #include <vector>
 
@@ -19,51 +22,21 @@ namespace core {
  */
     class DriverInterface {
     public:
-        /**
-         * @brief Costruttore.
-         * @param printer Oggetto che implementa Printer.
-         */
         explicit DriverInterface(std::shared_ptr<Printer> printer, std::shared_ptr<SerialPort> serialPort);
 
-        /**
-         * @brief Movimento sugli assi X, Y, Z con feedrate specificato.
-         */
-        types::Result moveTo(float x, float y, float z, float feedrate);
+        std::shared_ptr<command::motion::MotionCommands> motion() const;
 
-        /**
-         * @brief Estrusione del filamento.
-         */
-        types::Result extrude(float millimeters, float feedrate);
+        std::shared_ptr<command::extruder::ExtruderCommands> extruder() const;
 
-        /**
-         * @brief Comando di homing assi.
-         */
-        types::Result homeAxes();
+        std::shared_ptr<command::fan::FanCommands> fan() const;
 
-        /**
-         * @brief Imposta temperatura del bed.
-         */
-        types::Result setBedTemperature(int temperature);
+        std::shared_ptr<command::system::SystemCommands> system() const;
 
-        /**
-         * @brief Imposta la velocità della ventola.
-         */
-        types::Result fanSetSpeed(int speedPercent);
-
-        /**
-         * @brief Arresto di emergenza.
-         */
-        types::Result emergencyStop();
-
-        /**
-         * @brief Invio di comando custom raw.
-         */
         types::Result sendCustomCommand(const std::string &rawCommand);
 
-        /**
-         * @brief Recupera lo stato corrente del driver.
-         */
         PrintState getState() const;
+
+        types::Result sendCommandInternal(char category, int code, const std::vector<std::string> &params);
 
     private:
         std::shared_ptr<Printer> printer_;
@@ -72,7 +45,10 @@ namespace core {
         std::shared_ptr<CommandExecutor> commandExecutor_;
         PrintState currentState_;
 
-        types::Result sendCommandInternal(char category, int code, const std::vector<std::string> &params);
+        std::shared_ptr<command::motion::MotionCommands> motion_;
+        std::shared_ptr<command::extruder::ExtruderCommands> extruder_;
+        std::shared_ptr<command::fan::FanCommands> fan_;
+        std::shared_ptr<command::system::SystemCommands> system_;
     };
 
-}
+} // namespace core
