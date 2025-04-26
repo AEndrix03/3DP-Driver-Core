@@ -25,7 +25,7 @@ namespace core {
             std::string response = serial_->receiveLine();
 
             if (response.empty()) {
-                throw types::TimeoutException();
+                continue; // Aspetta fino al prossimo messaggio
             }
 
             // Solo righe che iniziano per OK, ERR o RESEND sono considerate valide

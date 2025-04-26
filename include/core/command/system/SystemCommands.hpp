@@ -16,9 +16,19 @@ namespace core::command::system {
     public:
         explicit SystemCommands(DriverInterface *driver);
 
-        types::Result reset();
+        types::Result homing();
 
-        types::Result getSystemInfo();
+        types::Result startPrint();
+
+        types::Result pause();
+
+        types::Result resume();
+
+        types::Result emergencyReset();
+
+        types::Result brutalReset();
+
+        types::Result printStatus();
     };
 
 } // namespace core::command::system

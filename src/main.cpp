@@ -24,14 +24,8 @@ int main() {
         // Inizializza connessione
         printer->initialize();
 
-        // MOVE TO
-        auto moveResult = driver.motion()->moveTo(10.0f, 20.0f, 5.0f, 1500.0f);
-        if (moveResult.isSuccess()) {
-            std::cout << "[Driver] Move command success!" << std::endl;
-        } else {
-            std::cerr << "[Driver] Move failed: " << moveResult.message << std::endl;
-        }
-
+        driver.system()->startPrint();
+        driver.motion()->moveTo(10.0f, 20.0f, 5.0f, 1500.0f);
 
         // Shutdown (non obbligatorio per ora)
         printer->shutdown();

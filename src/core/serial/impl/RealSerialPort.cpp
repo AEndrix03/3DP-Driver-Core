@@ -23,10 +23,11 @@ namespace core {
 
     std::string RealSerialPort::receiveLine() {
         if (serial_ && serial_->isOpen()) {
-            std::cout << "[RX] Waiting for data..." << std::endl;
             try {
                 auto received = serial_->readline(256, "\n");
-                std::cout << "[RX] Received: " << received << std::endl;
+                if (!received.empty()) {
+                    std::cout << "[RX] Received: " << received << std::endl;
+                }
                 return received;
             } catch (const std::exception &ex) {
                 std::cerr << "[Serial ERROR] Exception while reading: " << ex.what() << std::endl;
@@ -40,5 +41,5 @@ namespace core {
     bool RealSerialPort::isOpen() const {
         return serial_ && serial_->isOpen();
     }
-    
+
 } // namespace core

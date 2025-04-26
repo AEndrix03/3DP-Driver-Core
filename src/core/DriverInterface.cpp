@@ -51,11 +51,6 @@ namespace core {
         std::string command = CommandBuilder::buildCommand(cmdNum, category, code, params);
         commandContext_->storeCommand(cmdNum, command);
 
-        if (!printer_->sendCommand(command)) {
-            currentState_ = PrintState::Error;
-            return {types::ResultCode::Error, "Failed to send command."};
-        }
-
         auto result = commandExecutor_->sendCommandAndAwaitResponse(command, cmdNum);
 
         if (result.isSuccess()) {
