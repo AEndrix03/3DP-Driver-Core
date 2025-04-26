@@ -4,6 +4,7 @@
 
 #include "core/printer/impl/RealPrinter.hpp"
 #include "core/serial/SerialPort.hpp"
+#include "core/logger/Logger.hpp"
 #include <iostream>
 
 namespace core {
@@ -12,8 +13,9 @@ namespace core {
             : serial_(std::move(serial)) {}
 
     void RealPrinter::initialize() {
-        std::cout << "[Printer] Waiting for system ready..." << std::endl;
+        Logger::logInfo("[Printer] Waiting for system ready...");
         if (!serial_ || !serial_->isOpen()) {
+            Logger::logError("Serial port not open during printer initialization");
             throw std::runtime_error("Serial port not open during printer initialization");
         }
 
@@ -22,9 +24,9 @@ namespace core {
             if (line.empty()) {
                 continue; // Timeout, ma retry
             }
-            std::cout << "[Printer] RX during init: " << line << std::endl;
+            Logger::logInfo("[Printer] RX during init:" + line);
             if (line.find("Sistema pronto.") != std::string::npos) {
-                std::cout << "[Printer] System is ready!" << std::endl;
+                Logger::logInfo("[Printer] System is ready!");
                 break;
             }
         }
@@ -39,7 +41,7 @@ namespace core {
     }
 
     void RealPrinter::shutdown() {
-        std::cout << "[Printer] Shutdown requested." << std::endl;
+        Logger::logInfo("[Printer] Shutdown requested.");
     }
 
 } // namespace core

@@ -1,8 +1,7 @@
 #include "core/DriverInterface.hpp"
 #include "core/serial/impl/RealSerialPort.hpp"
 #include "core/printer/impl/RealPrinter.hpp"
-#include "core/printer/PrintState.hpp"
-#include "core/types/Result.hpp"
+#include "core/logger/Logger.hpp"
 #include "core/printer/Printer.hpp"
 
 #include <iostream>
@@ -12,7 +11,8 @@ using namespace core;
 
 int main() {
     try {
-        std::cout << "Starting 3DP Driver Core with RealSerialPort..." << std::endl;
+        Logger::init();
+        Logger::logInfo("Starting 3DP Driver Core with RealSerialPort...");
 
         //std::string portName = "/dev/ttyUSB0"; // Linux
         std::string portName = "COM4"; // Windows
@@ -31,7 +31,9 @@ int main() {
         printer->shutdown();
 
     } catch (const std::exception &ex) {
-        std::cerr << "[Fatal Error]: " << ex.what() << std::endl;
+        std::stringstream ss;
+        ss << "[Fatal Error]: " << ex.what();
+        Logger::logError(ss.str());
         return 1;
     }
 

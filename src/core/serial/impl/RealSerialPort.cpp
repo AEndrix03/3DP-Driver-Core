@@ -1,4 +1,5 @@
 #include "core/serial/impl/RealSerialPort.hpp"
+#include "core/logger/Logger.hpp"
 #include <iostream>
 
 namespace core {
@@ -6,18 +7,18 @@ namespace core {
     RealSerialPort::RealSerialPort(const std::string &portName, uint32_t baudrate)
             : serial_(std::make_unique<serial::Serial>(portName, baudrate, serial::Timeout::simpleTimeout(1000))) {
         if (serial_ && serial_->isOpen()) {
-            std::cout << "[SerialPort] Opened successfully on " << portName << std::endl;
+            Logger::logInfo("[SerialPort] Opened successfully on " + portName);
         } else {
-            std::cerr << "[SerialPort] Failed to open " << portName << std::endl;
+            Logger::logError("[SerialPort] Failed to open " + portName);
         }
     }
 
     void RealSerialPort::send(const std::string &data) {
         if (serial_ && serial_->isOpen()) {
-            std::cout << "[TX] " << data << std::endl;
+            Logger::logInfo("[TX] " + data);
             serial_->write(data + "\n");
         } else {
-            std::cerr << "[Serial] ERROR: Serial port not open when trying to send!" << std::endl;
+            Logger::logError("[Serial] ERROR: Serial port not open when trying to send!");
         }
     }
 
@@ -26,15 +27,17 @@ namespace core {
             try {
                 auto received = serial_->readline(256, "\n");
                 if (!received.empty()) {
-                    std::cout << "[RX] Received: " << received << std::endl;
+                    Logger::logInfo("[RX] Received: " + received);
                 }
                 return received;
             } catch (const std::exception &ex) {
-                std::cerr << "[Serial ERROR] Exception while reading: " << ex.what() << std::endl;
+                std::stringstream ss;
+                ss << "[Serial ERROR] Exception while reading: " << ex.what();
+                Logger::logError(ss.str());
                 return "";
             }
         }
-        std::cerr << "[Serial] ERROR: Serial port not open when trying to receive!" << std::endl;
+        Logger::logError("[Serial] ERROR: Serial port not open when trying to receive!");
         return "";
     }
 
