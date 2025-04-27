@@ -25,7 +25,7 @@ int main() {
         printer->initialize();
 
         driver.system()->startPrint();
-        driver.motion()->moveTo(10.0f, 20.0f, 5.0f, 1500.0f);
+        driver.motion()->moveTo(100.0f, 20.0f, 5.0f, 1500.0f);
 
         while (true)
             driver.motion()->moveTo(1.0f, 0.0f, 0.0f, 1500.0f);

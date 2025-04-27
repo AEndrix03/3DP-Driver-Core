@@ -24,24 +24,27 @@ namespace core {
         serial_->send(command);
 
         int retries = 0;
-        const int maxRetries = 3;
-        const auto maxTimeoutPerAttempt = std::chrono::seconds(5);
+        const int maxRetries = 5;
+        const int baseTimeoutSeconds = 5;
+        const int timeoutIncrementSeconds = 5;
 
         while (retries <= maxRetries) {
             auto startTime = std::chrono::steady_clock::now();
+            auto maxTimeout = std::chrono::seconds(baseTimeoutSeconds + retries * timeoutIncrementSeconds);
 
             while (true) {
-                if (std::chrono::steady_clock::now() - startTime > maxTimeoutPerAttempt) {
+                if (std::chrono::steady_clock::now() - startTime > maxTimeout) {
                     Logger::logWarning(
-                            "[Timeout] No valid response within timeout for N" + std::to_string(expectedNumber));
-                    break;
+                            "[Timeout] No valid response within " + std::to_string(maxTimeout.count()) + "s for N" +
+                            std::to_string(expectedNumber));
+                    break; // timeout → conta come errore
                 }
 
                 std::string response = serial_->receiveLine();
                 if (response.empty() || response.find_first_not_of(" \t\r\n") == std::string::npos) {
                     continue;
                 }
-                
+
                 types::Result result = parseResponse(response, expectedNumber);
 
                 if (result.isSuccess()) {
@@ -49,6 +52,11 @@ namespace core {
                 }
 
                 if (result.isSkip()) {
+                    continue;
+                }
+
+                if (result.isBusy()) {
+                    startTime = std::chrono::steady_clock::now();
                     continue;
                 }
 
@@ -93,6 +101,10 @@ namespace core {
                 }
             }
             return {types::ResultCode::Success, "Command acknowledged."};
+        }
+
+        if (token == "BUSY") {
+            return {types::ResultCode::Busy, "Busy Serial: Command is processing."};
         }
 
         if (token == "RESEND") {

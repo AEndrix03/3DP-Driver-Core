@@ -9,6 +9,7 @@ namespace core::types {
         Success,
         Error,
         Skip,
+        Busy,
         Timeout,
         ChecksumMismatch,
         ResendFailed
@@ -29,6 +30,10 @@ namespace core::types {
 
         bool isSkip() const {
             return code == ResultCode::Skip;
+        }
+
+        bool isBusy() const {
+            return code == ResultCode::Busy;
         }
     };
 
