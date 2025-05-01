@@ -16,3 +16,7 @@ add_executable(3DP_Driver_Core ${SOURCES}
 target_sources(3DP_Driver_Core PRIVATE
         external/serial/src/serial.cc
 )
+
+add_library(3dp_driver STATIC ${SOURCES}
+        external/serial/src/serial.cc
+        external/serial/src/impl/win.cc)
