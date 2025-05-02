@@ -21,6 +21,15 @@ namespace core::command::motion {
         types::Result moveTo(float x, float y, float z, float feedrate);
 
         types::Result diagnoseAxis(const std::string &axis, float feedrate);
+
+        types::Result goTo(int x, int y, int z, float feedrate);
+
+        types::Result setPosition(int x, int y, int z);
+
+        types::Result zeroPosition();
+
+        types::Result getPosition();
+
     };
 
 } // namespace core::command::motion

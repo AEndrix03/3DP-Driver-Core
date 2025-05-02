@@ -32,4 +32,32 @@ namespace core::command::motion {
         return sendCommand('M', 99, params);
     }
 
+    types::Result MotionCommands::goTo(int x, int y, int z, float feedrate) {
+        std::vector<std::string> params = {
+                "X" + std::to_string(x),
+                "Y" + std::to_string(y),
+                "Z" + std::to_string(z),
+                "F" + std::to_string(feedrate)
+        };
+        return sendCommand('M', 11, params);
+    }
+
+    types::Result MotionCommands::setPosition(int x, int y, int z) {
+        std::vector<std::string> params = {
+                "X" + std::to_string(x),
+                "Y" + std::to_string(y),
+                "Z" + std::to_string(z)
+        };
+        return sendCommand('M', 12, params);
+    }
+
+    types::Result MotionCommands::zeroPosition() {
+        return sendCommand('M', 13, {});
+    }
+
+    types::Result MotionCommands::getPosition() {
+        return sendCommand('M', 114, {});
+    }
+
+
 } // namespace core::command::motion

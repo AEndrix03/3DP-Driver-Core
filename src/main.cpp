@@ -44,7 +44,7 @@ int main() {
 
         std::vector<std::string> testCommands = {
                 //"G28",
-                "G1 X10 Y10 Z5 F1500",
+                /*"G1 X10 Y10 Z5 F1500",
                 "G10 L3 F400",
                 "G11 L5 F400",
                 "M106 S255",
@@ -54,7 +54,8 @@ int main() {
                 "M119",
                 "M701",
                 "M702",
-                "G999"
+                "G999"*/
+                "G2 X50 Y0 I25 J25 F1200"
         };
 
         translator.parseLines(testCommands);
