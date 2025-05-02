@@ -1,37 +1,65 @@
 #include "core/DriverInterface.hpp"
 #include "core/serial/impl/RealSerialPort.hpp"
 #include "core/printer/impl/RealPrinter.hpp"
-#include "core/logger/Logger.hpp"
 #include "core/printer/Printer.hpp"
+#include "logger/Logger.hpp"
+
+#include "translator/GCodeTranslator.hpp"
+#include "translator/dispatchers/motion/MotionDispatcher.hpp"
+#include "translator/dispatchers/system/SystemDispatcher.hpp"
+#include "translator/dispatchers/extruder/ExtruderDispatcher.hpp"
+#include "translator/dispatchers/fan/FanDispatcher.hpp"
+#include "translator/dispatchers/endstop/EndstopDispatcher.hpp"
+#include "translator/dispatchers/temperature/TemperatureDispatcher.hpp"
+#include "translator/dispatchers/history/HistoryDispatcher.hpp"
 
 #include <iostream>
 #include <memory>
+#include <vector>
 
 using namespace core;
+using namespace translator::gcode;
 
 int main() {
     try {
         Logger::init();
-        Logger::logInfo("Starting 3DP Driver Core with RealSerialPort...");
+        Logger::logInfo("Starting 3DP Translator test...");
 
-        //std::string portName = "/dev/ttyUSB0"; // Linux
-        std::string portName = "COM4"; // Windows
-
-        std::shared_ptr<SerialPort> serialPort = std::make_shared<RealSerialPort>(portName, 115200);
-        std::shared_ptr<Printer> printer = std::make_shared<RealPrinter>(serialPort);
+        std::string portName = "COM4"; // o "/dev/ttyUSB0" per Linux
+        auto serialPort = std::make_shared<RealSerialPort>(portName, 115200);
+        auto printer = std::make_shared<RealPrinter>(serialPort);
         DriverInterface driver(printer, serialPort);
 
-        // Inizializza connessione
         printer->initialize();
 
-        driver.system()->startPrint();
-        driver.motion()->moveTo(100.0f, 20.0f, 5.0f, 1500.0f);
+        GCodeTranslator translator(std::make_shared<DriverInterface>(driver));
 
-        while (true)
-            driver.motion()->moveTo(1.0f, 0.0f, 0.0f, 1500.0f);
+        translator.registerDispatcher(std::make_unique<MotionDispatcher>(translator.getDriver()));
+        translator.registerDispatcher(std::make_unique<SystemDispatcher>(translator.getDriver()));
+        translator.registerDispatcher(std::make_unique<ExtruderDispatcher>(translator.getDriver()));
+        translator.registerDispatcher(std::make_unique<FanDispatcher>(translator.getDriver()));
+        translator.registerDispatcher(std::make_unique<EndstopDispatcher>(translator.getDriver()));
+        translator.registerDispatcher(std::make_unique<TemperatureDispatcher>(translator.getDriver()));
+        translator.registerDispatcher(std::make_unique<HistoryDispatcher>(translator.getDriver()));
 
+        std::vector<std::string> testCommands = {
+                //"G28",
+                "G1 X10 Y10 Z5 F1500",
+                "G10 L3 F400",
+                "G11 L5 F400",
+                "M106 S255",
+                "M107",
+                "M104 S200",
+                "M140 S60",
+                "M119",
+                "M701",
+                "M702",
+                "G220 X300",
+                "G999"
+        };
 
-        // Shutdown (non obbligatorio per ora)
+        translator.parseLines(testCommands);
+
         printer->shutdown();
 
     } catch (const std::exception &ex) {

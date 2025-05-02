@@ -4,7 +4,7 @@
 
 #include "core/printer/impl/RealPrinter.hpp"
 #include "core/serial/SerialPort.hpp"
-#include "core/logger/Logger.hpp"
+#include "logger/Logger.hpp"
 #include <iostream>
 
 namespace core {

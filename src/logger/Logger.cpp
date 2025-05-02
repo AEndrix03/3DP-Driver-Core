@@ -2,7 +2,7 @@
 // Created by redeg on 26/04/2025.
 //
 
-#include "core/logger/Logger.hpp"
+#include "logger/Logger.hpp"
 #include <iostream>
 #include <chrono>
 #include <iomanip>

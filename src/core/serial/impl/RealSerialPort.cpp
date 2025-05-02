@@ -1,5 +1,5 @@
 #include "core/serial/impl/RealSerialPort.hpp"
-#include "core/logger/Logger.hpp"
+#include "logger/Logger.hpp"
 #include <iostream>
 
 namespace core {

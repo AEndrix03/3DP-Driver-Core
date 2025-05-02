@@ -22,6 +22,10 @@ namespace core {
         return motion_;
     }
 
+    std::shared_ptr<command::endstop::EndstopCommands> DriverInterface::endstop() const {
+        return endstop_;
+    }
+
     std::shared_ptr<command::extruder::ExtruderCommands> DriverInterface::extruder() const {
         return extruder_;
     }
@@ -32,6 +36,14 @@ namespace core {
 
     std::shared_ptr<command::system::SystemCommands> DriverInterface::system() const {
         return system_;
+    }
+
+    std::shared_ptr<command::history::HistoryCommands> DriverInterface::history() const {
+        return history_;
+    }
+
+    std::shared_ptr<command::temperature::TemperatureCommands> DriverInterface::temperature() const {
+        return temperature_;
     }
 
     types::Result DriverInterface::sendCustomCommand(const std::string &rawCommand) {

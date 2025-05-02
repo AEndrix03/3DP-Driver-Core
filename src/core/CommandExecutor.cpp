@@ -4,7 +4,7 @@
 
 #include "core/CommandExecutor.hpp"
 #include "core/types/Error.hpp"
-#include "core/logger/Logger.hpp"
+#include "logger/Logger.hpp"
 #include <sstream>
 #include <chrono>
 
