@@ -26,6 +26,11 @@ namespace translator::gcode {
         if (command == "G2" || command == "G3") {
             return params.count("X") && params.count("Y") && params.count("I") && params.count("J");
         }
+        if (command == "G5") {
+            return params.count("X") && params.count("Y") &&
+                   params.count("I") && params.count("J") &&
+                   params.count("P") && params.count("Q");
+        }
         return true;
     }
 
