@@ -60,6 +60,22 @@ int main() {
 
         translator.parseLines(testCommands);
 
+        /*driver.system()->startPrint();
+        driver.motion()->goTo(10, 10, 10, 3000);
+        driver.motion()->getPosition();
+        driver.motion()->goTo(15, 0, 10, 3000);
+        driver.motion()->getPosition();
+        driver.motion()->goTo(10, 10, 10, 3000);
+        driver.motion()->getPosition();
+        driver.motion()->goTo(0, 0, 0, 3000);
+        driver.motion()->getPosition();
+        driver.motion()->goTo(5.8, 0.5, 5, 3000);
+        driver.motion()->getPosition();
+        driver.motion()->goTo(0, 0, 3.5, 3000);
+        driver.motion()->getPosition();
+        driver.motion()->moveTo(5.5, 6, 0, 3000);
+        driver.motion()->getPosition();*/
+
         printer->shutdown();
 
     } catch (const std::exception &ex) {

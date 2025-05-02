@@ -33,7 +33,7 @@ namespace core::command::motion {
         return sendCommand('M', 99, params);
     }
 
-    types::Result MotionCommands::goTo(int x, int y, int z, float feedrate) {
+    types::Result MotionCommands::goTo(float x, float y, float z, float feedrate) {
         std::vector<std::string> params = {
                 "X" + std::to_string(x),
                 "Y" + std::to_string(y),
@@ -43,38 +43,25 @@ namespace core::command::motion {
         return sendCommand('M', 11, params);
     }
 
-    types::Result MotionCommands::setPosition(int x, int y, int z) {
-        std::vector<std::string> params = {
-                "X" + std::to_string(x),
-                "Y" + std::to_string(y),
-                "Z" + std::to_string(z)
-        };
-        return sendCommand('M', 12, params);
-    }
-
-    types::Result MotionCommands::zeroPosition() {
-        return sendCommand('M', 13, {});
-    }
-
     std::optional<position::Position> MotionCommands::getPosition() {
         auto result = sendCommand('M', 114, {});
         if (!result.isSuccess()) return std::nullopt;
 
         position::Position pos;
-        std::regex rxX("X=([-]?[0-9]+)");
-        std::regex rxY("Y=([-]?[0-9]+)");
-        std::regex rxZ("Z=([-]?[0-9]+)");
+        std::regex rxX(R"(X=([-]?[0-9]*\.?[0-9]+))");
+        std::regex rxY(R"(Y=([-]?[0-9]*\.?[0-9]+))");
+        std::regex rxZ(R"(Z=([-]?[0-9]*\.?[0-9]+))");
         std::smatch match;
 
         for (const auto &line: result.body) {
             if (std::regex_search(line, match, rxX)) {
-                pos.x = std::stoi(match[1]);
+                pos.x = std::stod(match[1]);  // ora in mm
             }
             if (std::regex_search(line, match, rxY)) {
-                pos.y = std::stoi(match[1]);
+                pos.y = std::stod(match[1]);
             }
             if (std::regex_search(line, match, rxZ)) {
-                pos.z = std::stoi(match[1]);
+                pos.z = std::stod(match[1]);
             }
         }
 

@@ -38,6 +38,9 @@ namespace translator::gcode {
 
     void GCodeTranslator::parseLine(const std::string &line) {
         auto [command, params] = parseGCodeLine(line);
+        std::stringstream ss;
+        ss << "[Translator] Parsing: " << line;
+        Logger::logInfo(ss.str());
         dispatchCommand(command, params);
     }
 

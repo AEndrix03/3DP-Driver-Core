@@ -7,9 +7,9 @@
 namespace position {
 
     struct Position {
-        int x;
-        int y;
-        int z;
+        double x;
+        double y;
+        double z;
     };
 
 }
