@@ -14,9 +14,13 @@ namespace core {
               commandExecutor_(std::make_shared<CommandExecutor>(serialPort_, commandContext_)),
               currentState_(PrintState::Idle),
               motion_(std::make_shared<command::motion::MotionCommands>(this)),
+              endstop_(std::make_shared<command::endstop::EndstopCommands>(this)),
               extruder_(std::make_shared<command::extruder::ExtruderCommands>(this)),
               fan_(std::make_shared<command::fan::FanCommands>(this)),
-              system_(std::make_shared<command::system::SystemCommands>(this)) {}
+              system_(std::make_shared<command::system::SystemCommands>(this)),
+              history_(std::make_shared<command::history::HistoryCommands>(this)),
+              temperature_(std::make_shared<command::temperature::TemperatureCommands>(this)) {}
+
 
     std::shared_ptr<command::motion::MotionCommands> DriverInterface::motion() const {
         return motion_;
