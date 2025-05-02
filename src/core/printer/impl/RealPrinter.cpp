@@ -22,7 +22,7 @@ namespace core {
         while (true) {
             std::string line = serial_->receiveLine();
             if (line.empty()) {
-                continue; // Timeout, ma retry
+                continue;
             }
             Logger::logInfo("[Printer] RX during init:" + line);
             if (line.find("Sistema pronto.") != std::string::npos) {

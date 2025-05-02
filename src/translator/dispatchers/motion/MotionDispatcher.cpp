@@ -4,6 +4,7 @@
 
 #include "translator/dispatchers/motion/MotionDispatcher.hpp"
 #include <iostream>
+#include <cmath>
 
 namespace translator::gcode {
 
@@ -11,7 +12,8 @@ namespace translator::gcode {
             : driver_(std::move(driver)) {}
 
     bool MotionDispatcher::canHandle(const std::string &command) const {
-        return command == "G0" || command == "G1" || command == "G220" || command == "G999";
+        return command == "G0" || command == "G1" || command == "G220" || command == "G999" ||
+               command == "G2" || command == "G3";
     }
 
     bool MotionDispatcher::validate(const std::string &command, const std::map<std::string, double> &params) const {
@@ -20,6 +22,9 @@ namespace translator::gcode {
         }
         if (command == "G220") {
             return params.count("X") || params.count("Y") || params.count("Z");
+        }
+        if (command == "G2" || command == "G3") {
+            return params.count("X") && params.count("Y") && params.count("I") && params.count("J");
         }
         return true;
     }
@@ -37,8 +42,34 @@ namespace translator::gcode {
             if (params.count("Z")) driver_->motion()->diagnoseAxis("Z", params.at("Z"));
         } else if (command == "G999") {
             driver_->motion()->emergencyStop();
+        } else if (command == "G2" || command == "G3") {
+            double x = params.at("X");
+            double y = params.at("Y");
+            double i = params.at("I");
+            double j = params.at("J");
+            double f = params.count("F") ? params.at("F") : 1000;
+
+            // Calcolo dell'arco simulato
+            constexpr int segments = 20;
+            double cx = -i;
+            double cy = -j;
+            double radius = std::sqrt(cx * cx + cy * cy);
+
+            double startAngle = std::atan2(-cy, -cx);
+            double endAngle = std::atan2(y - cy, x - cx);
+
+            // correzione direzione G2 (orario) o G3 (antiorario)
+            double deltaAngle = endAngle - startAngle;
+            if (command == "G2" && deltaAngle > 0) deltaAngle -= 2 * M_PI;
+            if (command == "G3" && deltaAngle < 0) deltaAngle += 2 * M_PI;
+
+            for (int i = 1; i <= segments; ++i) {
+                double angle = startAngle + deltaAngle * i / segments;
+                double px = cx + radius * std::cos(angle);
+                double py = cy + radius * std::sin(angle);
+                driver_->motion()->moveTo(px, py, -1, f);
+            }
         }
     }
 
 } // namespace translator::gcode
-

@@ -17,7 +17,7 @@ namespace translator::gcode {
     }
 
     bool SystemDispatcher::validate(const std::string &command, const std::map<std::string, double> &) const {
-        return true; // tutti i comandi sono validi senza parametri
+        return true;
     }
 
     void SystemDispatcher::handle(const std::string &command, const std::map<std::string, double> &) {
@@ -35,7 +35,17 @@ namespace translator::gcode {
             driver_->system()->brutalReset();
         } else if (command == "M999") {
             driver_->system()->emergencyReset();
-        }
+        } /*else if (command == "M0") {
+            driver_->system()->stop();
+        } else if (command == "M1") {
+            driver_->system()->sleep();
+        } else if (command == "M17") {
+            driver_->system()->enableMotors();
+        } else if (command == "M18") {
+            driver_->system()->disableMotors();
+        } else if (command == "M81") {
+            driver_->system()->powerOff();
+        }*/
     }
 
 } // namespace translator::gcode
