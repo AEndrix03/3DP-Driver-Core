@@ -6,6 +6,7 @@
 
 #include "core/command/CommandCategoryInterface.hpp"
 #include "./../../types/Result.hpp"
+#include "core/types/Position.hpp"
 
 namespace core::command::motion {
 
@@ -28,7 +29,7 @@ namespace core::command::motion {
 
         types::Result zeroPosition();
 
-        types::Result getPosition();
+        std::optional<position::Position> getPosition();
 
     };
 

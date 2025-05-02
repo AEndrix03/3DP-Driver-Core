@@ -2,6 +2,7 @@
 // Created by redeg on 26/04/2025.
 //
 
+#include <regex>
 #include "core/command/motion/MotionCommands.hpp"
 #include "core/DriverInterface.hpp"
 
@@ -55,8 +56,29 @@ namespace core::command::motion {
         return sendCommand('M', 13, {});
     }
 
-    types::Result MotionCommands::getPosition() {
-        return sendCommand('M', 114, {});
+    std::optional<position::Position> MotionCommands::getPosition() {
+        auto result = sendCommand('M', 114, {});
+        if (!result.isSuccess()) return std::nullopt;
+
+        position::Position pos;
+        std::regex rxX("X=([-]?[0-9]+)");
+        std::regex rxY("Y=([-]?[0-9]+)");
+        std::regex rxZ("Z=([-]?[0-9]+)");
+        std::smatch match;
+
+        for (const auto &line: result.body) {
+            if (std::regex_search(line, match, rxX)) {
+                pos.x = std::stoi(match[1]);
+            }
+            if (std::regex_search(line, match, rxY)) {
+                pos.y = std::stoi(match[1]);
+            }
+            if (std::regex_search(line, match, rxZ)) {
+                pos.z = std::stoi(match[1]);
+            }
+        }
+
+        return pos;
     }
 
 

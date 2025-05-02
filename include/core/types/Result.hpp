@@ -2,6 +2,7 @@
 
 #include <string>
 #include <optional>
+#include <vector>
 
 namespace core::types {
 
@@ -19,6 +20,7 @@ namespace core::types {
         ResultCode code;
         std::string message;
         std::optional<int> commandNumber;
+        std::vector<std::string> body;
 
         bool isSuccess() const {
             return code == ResultCode::Success;

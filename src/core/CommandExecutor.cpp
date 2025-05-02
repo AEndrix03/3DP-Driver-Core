@@ -28,6 +28,10 @@ namespace core {
         const int baseTimeoutSeconds = 5;
         const int timeoutIncrementSeconds = 5;
 
+        types::Result resultAccumulated;
+        resultAccumulated.code = types::ResultCode::Skip;
+        resultAccumulated.commandNumber = expectedNumber;
+
         while (retries <= maxRetries) {
             auto startTime = std::chrono::steady_clock::now();
             auto maxTimeout = std::chrono::seconds(baseTimeoutSeconds + retries * timeoutIncrementSeconds);
@@ -45,10 +49,16 @@ namespace core {
                     continue;
                 }
 
+                if (!response.compare(0, 4, "BUSY") != 0) {
+                    resultAccumulated.body.push_back(response);
+                }
+
                 types::Result result = parseResponse(response, expectedNumber);
 
                 if (result.isSuccess()) {
-                    return result;
+                    resultAccumulated.code = types::ResultCode::Success;
+                    resultAccumulated.message = result.message;
+                    return resultAccumulated;
                 }
 
                 if (result.isSkip()) {
