@@ -7,7 +7,7 @@
 #include <string>
 #include <unordered_map>
 #include <functional>
-#include "models/Command.hpp"
+#include "connector/models/Command.hpp"
 #include "logger/Logger.hpp"
 
 namespace connector {

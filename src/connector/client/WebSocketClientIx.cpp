@@ -1,82 +1,134 @@
 #include "connector/client/WebSocketClient.hpp"
 #include "logger/Logger.hpp"
-#include "connector/utils/Time.hpp"
 #include <ixwebsocket/IXWebSocket.h>
 #include <thread>
 #include <atomic>
+#include <mutex>
+#include <deque>
+#include <random>
+#include <chrono>
 
 namespace connector {
 
     class WebSocketClientIx : public WebSocketClient {
     public:
         explicit WebSocketClientIx(const std::string &url)
-                : url_(url), running_(false) {}
+                : url_(url),
+                  running_(false),
+                  connected_(false),
+                  backoffSecs_(1),
+                  totalReconnects_(0) {}
 
         void connect() override {
             if (running_) return;
-
             running_ = true;
+            doConnect();
+            reconThread_ = std::thread([this]() { reconnectLoop(); });
+        }
+
+        void disconnect() override {
+            running_ = false;
+            {
+                std::lock_guard lock(mutex_);
+                sendQueue_.clear();
+            }
+            socket_.stop();
+            if (reconThread_.joinable()) reconThread_.join();
+            if (hbThread_.joinable()) hbThread_.join();
+        }
+
+        void send(const std::string &msg) override {
+            std::lock_guard lock(mutex_);
+            if (connected_) {
+                Logger::logInfo("[WS] Sending: " + msg);
+                socket_.send(msg);
+            } else {
+                Logger::logInfo("[WS] Buffering: " + msg);
+                sendQueue_.push_back(msg);
+            }
+        }
+
+        ~WebSocketClientIx() override { disconnect(); }
+
+    private:
+        std::string url_;
+        ix::WebSocket socket_;
+        std::atomic<bool> running_, connected_;
+        std::atomic<int> backoffSecs_, totalReconnects_;
+        std::thread reconThread_, hbThread_;
+        std::mutex mutex_;
+        std::deque<std::string> sendQueue_;
+
+        void doConnect() {
             socket_.setUrl(url_);
-            socket_.setPingInterval(10);
             socket_.disableAutomaticReconnection();
+            socket_.setPingInterval(0);  // gestiamo heartbeat a livello applicativo
 
             socket_.setOnMessageCallback([this](const ix::WebSocketMessagePtr &msg) {
-                switch (msg->type) {
-                    case ix::WebSocketMessageType::Message:
-                        Logger::logInfo("[WS] Message received");
-                        if (onMessage_) onMessage_(msg->str);
-                        break;
-                    case ix::WebSocketMessageType::Open:
-                        Logger::logInfo("[WS] Connected to " + url_);
-                        break;
-                    case ix::WebSocketMessageType::Close:
-                        Logger::logWarning("[WS] Connection closed. Scheduling reconnect...");
-                        scheduleReconnect();
-                        break;
-                    case ix::WebSocketMessageType::Error:
-                        Logger::logError("[WS] Error: " + msg->errorInfo.reason);
-                        break;
-                    default:
-                        Logger::logWarning("[WS] Unknown message type");
-                        break;
+                if (msg->type == ix::WebSocketMessageType::Open) {
+                    onSocketOpen();
+                } else if (msg->type == ix::WebSocketMessageType::Close) {
+                    onSocketClose();
+                } else if (msg->type == ix::WebSocketMessageType::Message) {
+                    if (onMessage_) onMessage_(msg->str);
+                } else if (msg->type == ix::WebSocketMessageType::Error) {
+                    Logger::logError("[WS] Error: " + msg->errorInfo.reason);
                 }
             });
 
             socket_.start();
         }
 
-        void disconnect() override {
-            running_ = false;
-            socket_.stop();
+        void onSocketOpen() {
+            {
+                std::lock_guard lock(mutex_);
+                connected_ = true;
+                backoffSecs_ = 1;
+                totalReconnects_ = 0;
+                for (auto &m: sendQueue_) socket_.send(m);
+                sendQueue_.clear();
+            }
+            Logger::logInfo("[WS] Connected to " + url_);
+            if (onOpen_) onOpen_();
+            startHeartbeat();
         }
 
-        void send(const std::string &msg) override {
-            Logger::logInfo("[WS] Sending: " + msg);
-            socket_.send(msg);
+        void onSocketClose() {
+            {
+                std::lock_guard lock(mutex_);
+                connected_ = false;
+            }
+            Logger::logWarning("[WS] Disconnected");
+            if (onClose_) onClose_();
         }
 
-        ~WebSocketClientIx() override {
-            disconnect();
+        void reconnectLoop() {
+            while (running_) {
+                std::this_thread::sleep_for(std::chrono::seconds(backoffSecs_));
+                if (!running_) break;
+                if (!connected_) {
+                    Logger::logInfo("[WS] Reconnect attempt #" + std::to_string(++totalReconnects_));
+                    doConnect();
+                    // exponential backoff with cap 60s
+                    backoffSecs_ = std::min(backoffSecs_ * 2, 60);
+                }
+            }
         }
 
-    private:
-        std::string url_;
-        ix::WebSocket socket_;
-        std::atomic<bool> running_;
-
-        void scheduleReconnect() {
-            std::thread([this]() {
-                int retry = 0;
+        void startHeartbeat() {
+            if (hbThread_.joinable()) return;
+            hbThread_ = std::thread([this]() {
                 while (running_) {
-                    std::this_thread::sleep_for(std::chrono::seconds(5));
-                    if (socket_.getReadyState() != ix::ReadyState::Open) {
-                        Logger::logInfo("[WS] Reconnecting attempt " + std::to_string(++retry));
-                        connect();
-                    } else {
-                        break;
+                    std::this_thread::sleep_for(std::chrono::seconds(30));
+                    if (connected_) {
+                        std::string ping = R"({"type":"ping","payload":{"sentAt":)"
+                                           + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::system_clock::now().time_since_epoch()).count())
+                                           + R"(}})";
+                        send(ping);
                     }
                 }
-            }).detach();
+            });
         }
     };
 
@@ -84,4 +136,4 @@ namespace connector {
         return std::make_shared<WebSocketClientIx>(url);
     }
 
-}
+} // namespace connector

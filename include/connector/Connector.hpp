@@ -1,14 +1,11 @@
-//
-// Created by redeg on 03/05/2025.
-//
-
 #pragma once
 
 #include <memory>
-#include "models/Command.hpp"
-#include "models/Event.hpp"
 
 namespace connector {
+    class Command;
+
+    class Event;
 
     class Connector {
     public:
