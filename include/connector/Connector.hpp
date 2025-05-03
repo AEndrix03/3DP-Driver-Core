@@ -15,8 +15,6 @@ namespace connector {
 
         virtual void sendEvent(const Event &event) = 0;
 
-        virtual void receiveCommand(const Command &command) = 0;
-
         virtual ~Connector() = default;
     };
 

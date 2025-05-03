@@ -3,6 +3,7 @@
 #include "connector/bus/RemoteCommandBus.hpp"
 #include "logger/Logger.hpp"
 #include "connector/utils/Config.hpp"
+#include "connector/models/Event.hpp"
 #include <memory>
 
 namespace connector {
@@ -39,10 +40,6 @@ namespace connector {
             } catch (const std::exception &e) {
                 Logger::logError("[Connector] Send error: " + std::string(e.what()));
             }
-        }
-
-        void receiveCommand(const Command & /*cmd*/) override {
-            // non usato: usiamo bus::dispatch
         }
 
     private:
