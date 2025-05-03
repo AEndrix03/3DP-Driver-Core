@@ -6,7 +6,16 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include_directories(include)
 include_directories(external/serial/include)
-include_directories(external/nlohmann/json/single_include)
+
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
+
+set(ZLIB_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/external/zlib")
+set(ZLIB_LIBRARY zlibstatic)
+set(ZLIB_LIBRARIES zlibstatic)
+
+add_subdirectory(external/zlib)
+
 add_subdirectory(external/ixwebsocket)
 
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS src/*.cpp)
@@ -16,9 +25,6 @@ add_executable(3DP_Driver_Core
         external/serial/src/serial.cc
         external/serial/src/impl/win.cc)
 
-target_sources(3DP_Driver_Core PRIVATE
-        external/serial/src/serial.cc)
-
 add_library(3dp_driver STATIC
         ${SOURCES}
         external/serial/src/serial.cc
@@ -26,11 +32,6 @@ add_library(3dp_driver STATIC
 
 target_include_directories(3DP_Driver_Core PRIVATE external/nlohmann/json/single_include)
 target_include_directories(3dp_driver PRIVATE external/nlohmann/json/single_include)
-target_link_libraries(3DP_Driver_Core PRIVATE ixwebsocket)
-target_link_libraries(3dp_driver PRIVATE ixwebsocket)
 
-set(ZLIB_INCLUDE_DIR "external/zlib/include")
-set(ZLIB_LIBRARY "external/zlib/lib/zlibstatic.lib")
-
-find_package(ZLIB REQUIRED)
-
+target_link_libraries(3DP_Driver_Core PRIVATE ixwebsocket zlibstatic)
+target_link_libraries(3dp_driver PRIVATE ixwebsocket zlibstatic)

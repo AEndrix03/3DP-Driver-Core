@@ -1,9 +1,4 @@
-//
-// Created by redeg on 03/05/2025.
-//
-
 #include "connector/client/WebSocketClient.hpp"
-
 #include "logger/Logger.hpp"
 #include "connector/utils/Time.hpp"
 #include <ixwebsocket/IXWebSocket.h>
@@ -18,26 +13,36 @@ namespace connector {
                 : url_(url), running_(false) {}
 
         void connect() override {
+            if (running_) return;
+
+            running_ = true;
             socket_.setUrl(url_);
             socket_.setPingInterval(10);
-            socket_.disableAutomaticReconnection(); // lo gestiamo noi
+            socket_.disableAutomaticReconnection();
 
             socket_.setOnMessageCallback([this](const ix::WebSocketMessagePtr &msg) {
-                if (msg->type == ix::WebSocketMessageType::Message) {
-                    logger::info("[WS] Message received");
-                    if (onMessage_) onMessage_(msg->str);
-                } else if (msg->type == ix::WebSocketMessageType::Open) {
-                    logger::info("[WS] Connected to " + url_);
-                } else if (msg->type == ix::WebSocketMessageType::Close) {
-                    logger::warn("[WS] Connection closed. Attempting reconnect...");
-                    scheduleReconnect();
-                } else if (msg->type == ix::WebSocketMessageType::Error) {
-                    logger::error("[WS] Error: " + msg->errorInfo.reason);
+                switch (msg->type) {
+                    case ix::WebSocketMessageType::Message:
+                        Logger::logInfo("[WS] Message received");
+                        if (onMessage_) onMessage_(msg->str);
+                        break;
+                    case ix::WebSocketMessageType::Open:
+                        Logger::logInfo("[WS] Connected to " + url_);
+                        break;
+                    case ix::WebSocketMessageType::Close:
+                        Logger::logWarning("[WS] Connection closed. Scheduling reconnect...");
+                        scheduleReconnect();
+                        break;
+                    case ix::WebSocketMessageType::Error:
+                        Logger::logError("[WS] Error: " + msg->errorInfo.reason);
+                        break;
+                    default:
+                        Logger::logWarning("[WS] Unknown message type");
+                        break;
                 }
             });
 
             socket_.start();
-            running_ = true;
         }
 
         void disconnect() override {
@@ -46,7 +51,7 @@ namespace connector {
         }
 
         void send(const std::string &msg) override {
-            logger::debug("[WS] Sending: " + msg);
+            Logger::logInfo("[WS] Sending: " + msg);
             socket_.send(msg);
         }
 
@@ -64,9 +69,12 @@ namespace connector {
                 int retry = 0;
                 while (running_) {
                     std::this_thread::sleep_for(std::chrono::seconds(5));
-                    logger::info("[WS] Reconnecting attempt " + std::to_string(++retry));
-                    connect();  // tenta riconnessione
-                    if (socket_.getReadyState() == ix::ReadyState::Open) break;
+                    if (socket_.getReadyState() != ix::ReadyState::Open) {
+                        Logger::logInfo("[WS] Reconnecting attempt " + std::to_string(++retry));
+                        connect();
+                    } else {
+                        break;
+                    }
                 }
             }).detach();
         }

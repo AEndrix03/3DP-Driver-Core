@@ -22,8 +22,12 @@ namespace connector {
             onMessage_ = std::move(callback);
         }
 
+        virtual ~WebSocketClient() = default;
+
     protected:
         std::function<void(const std::string &)> onMessage_;
     };
+
+    std::shared_ptr<WebSocketClient> createWebSocketClient(const std::string &url);
 
 }
