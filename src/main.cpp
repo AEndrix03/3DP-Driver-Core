@@ -13,75 +13,69 @@
 #include "translator/dispatchers/temperature/TemperatureDispatcher.hpp"
 #include "translator/dispatchers/history/HistoryDispatcher.hpp"
 
+#include "connector/Connector.hpp"
+#include "connector/utils/Config.hpp"
+
 #include <iostream>
 #include <memory>
 #include <vector>
+#include <thread>
+#include <atomic>
+#include <csignal>
+#include <chrono>
 
-using namespace core;
-using namespace translator::gcode;
+std::atomic<bool> running{true};
+
+void handleSignal(int) {
+    running = false;
+}
 
 int main() {
     try {
         Logger::init();
-        Logger::logInfo("Starting 3DP Translator test...");
 
-        std::string portName = "COM4"; // o "/dev/ttyUSB0" per Linux
-        auto serialPort = std::make_shared<RealSerialPort>(portName, 115200);
-        auto printer = std::make_shared<RealPrinter>(serialPort);
-        DriverInterface driver(printer, serialPort);
+        std::signal(SIGINT, handleSignal);
+        std::signal(SIGTERM, handleSignal);
+
+        Logger::logInfo("Starting 3DP Driver and Translator...");
+
+        std::string portName = "COM4";
+        auto serialPort = std::make_shared<core::RealSerialPort>(portName, 115200);
+        auto printer = std::make_shared<core::RealPrinter>(serialPort);
+        core::DriverInterface driver(printer, serialPort);
 
         printer->initialize();
 
-        GCodeTranslator translator(std::make_shared<DriverInterface>(driver));
+        translator::gcode::GCodeTranslator translator(std::make_shared<core::DriverInterface>(driver));
 
-        translator.registerDispatcher(std::make_unique<MotionDispatcher>(translator.getDriver()));
-        translator.registerDispatcher(std::make_unique<SystemDispatcher>(translator.getDriver()));
-        translator.registerDispatcher(std::make_unique<ExtruderDispatcher>(translator.getDriver()));
-        translator.registerDispatcher(std::make_unique<FanDispatcher>(translator.getDriver()));
-        translator.registerDispatcher(std::make_unique<EndstopDispatcher>(translator.getDriver()));
-        translator.registerDispatcher(std::make_unique<TemperatureDispatcher>(translator.getDriver()));
-        translator.registerDispatcher(std::make_unique<HistoryDispatcher>(translator.getDriver()));
+        translator.registerDispatcher(std::make_unique<translator::gcode::MotionDispatcher>(translator.getDriver()));
+        translator.registerDispatcher(std::make_unique<translator::gcode::SystemDispatcher>(translator.getDriver()));
+        translator.registerDispatcher(std::make_unique<translator::gcode::ExtruderDispatcher>(translator.getDriver()));
+        translator.registerDispatcher(std::make_unique<translator::gcode::FanDispatcher>(translator.getDriver()));
+        translator.registerDispatcher(std::make_unique<translator::gcode::EndstopDispatcher>(translator.getDriver()));
+        translator.registerDispatcher(
+                std::make_unique<translator::gcode::TemperatureDispatcher>(translator.getDriver()));
+        translator.registerDispatcher(std::make_unique<translator::gcode::HistoryDispatcher>(translator.getDriver()));
+
+        auto connector = connector::createConnector();
+        std::thread connectorThread([&]() {
+            connector->start();
+            while (running) std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            connector->stop();
+        });
 
         std::vector<std::string> testCommands = {
-                //"G28",
-                /*"G1 X10 Y10 Z5 F1500",
-                "G10 L3 F400",
-                "G11 L5 F400",
-                "M106 S255",
-                "M107",
-                "M104 S200",
-                "M140 S60",
-                "M119",
-                "M701",
-                "M702",
-                "G999"*/
                 "G2 X50 Y0 I25 J25 F1200"
         };
-
         translator.parseLines(testCommands);
 
-        /*driver.system()->startPrint();
-        driver.motion()->goTo(10, 10, 10, 3000);
-        driver.motion()->getPosition();
-        driver.motion()->goTo(15, 0, 10, 3000);
-        driver.motion()->getPosition();
-        driver.motion()->goTo(10, 10, 10, 3000);
-        driver.motion()->getPosition();
-        driver.motion()->goTo(0, 0, 0, 3000);
-        driver.motion()->getPosition();
-        driver.motion()->goTo(5.8, 0.5, 5, 3000);
-        driver.motion()->getPosition();
-        driver.motion()->goTo(0, 0, 3.5, 3000);
-        driver.motion()->getPosition();
-        driver.motion()->moveTo(5.5, 6, 0, 3000);
-        driver.motion()->getPosition();*/
+        while (running) std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
         printer->shutdown();
+        if (connectorThread.joinable()) connectorThread.join();
 
     } catch (const std::exception &ex) {
-        std::stringstream ss;
-        ss << "[Fatal Error]: " << ex.what();
-        Logger::logError(ss.str());
+        Logger::logError(std::string("[Fatal Error]: ") + ex.what());
         return 1;
     }
 

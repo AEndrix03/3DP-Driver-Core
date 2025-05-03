@@ -62,7 +62,7 @@ namespace connector {
         void doConnect() {
             socket_.setUrl(url_);
             socket_.disableAutomaticReconnection();
-            socket_.setPingInterval(0);  // gestiamo heartbeat a livello applicativo
+            socket_.setPingInterval(0);
 
             socket_.setOnMessageCallback([this](const ix::WebSocketMessagePtr &msg) {
                 if (msg->type == ix::WebSocketMessageType::Open) {
