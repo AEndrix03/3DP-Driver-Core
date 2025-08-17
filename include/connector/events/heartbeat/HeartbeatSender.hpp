@@ -1,27 +1,14 @@
 #pragma once
 
-#include "../BaseSender.hpp"
+#include "../../kafka/KafkaProducerBase.hpp"
 
 namespace connector::events::heartbeat {
 
-    class HeartbeatSender : public BaseSender {
+    class HeartbeatSender : public kafka::KafkaProducerBase {
     public:
-        bool sendMessage(const std::string &message, const std::string &key = "") override {
-            // TODO: Send to printer-heartbeat-response topic via Kafka producer
-            (void) message;
-            (void) key;
-            return false;
-        }
+        explicit HeartbeatSender(const kafka::KafkaConfig &config);
 
-        bool isReady() const override {
-            // TODO: Check Kafka producer readiness
-            return false;
-        }
-
-        std::string getTopicName() const override {
-            return "printer-heartbeat-response";
-        }
-
+    protected:
         std::string getSenderName() const override {
             return "HeartbeatSender";
         }

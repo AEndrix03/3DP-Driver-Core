@@ -1,28 +1,14 @@
 #pragma once
 
-#include "../BaseReceiver.hpp"
+#include "../../kafka/KafkaConsumerBase.hpp"
 
 namespace connector::events::heartbeat {
 
-    class HeartbeatReceiver : public BaseReceiver {
+    class HeartbeatReceiver : public kafka::KafkaConsumerBase {
     public:
-        void startReceiving() override {
-            // TODO: Implement Kafka consumer for printer-heartbeat-request topic
-        }
+        explicit HeartbeatReceiver(const kafka::KafkaConfig &config);
 
-        void stopReceiving() override {
-            // TODO: Stop Kafka consumer
-        }
-
-        bool isReceiving() const override {
-            // TODO: Check Kafka consumer status
-            return false;
-        }
-
-        std::string getTopicName() const override {
-            return "printer-heartbeat-request";
-        }
-
+    protected:
         std::string getReceiverName() const override {
             return "HeartbeatReceiver";
         }

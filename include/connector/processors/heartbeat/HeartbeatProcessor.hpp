@@ -3,27 +3,34 @@
 #include "../BaseProcessor.hpp"
 #include "../../models/heartbeat/HeartbeatRequest.hpp"
 #include "../../models/heartbeat/HeartbeatResponse.hpp"
+#include "../../events/heartbeat/HeartbeatSender.hpp"
+#include "core/DriverInterface.hpp"
+#include <memory>
 
 namespace connector::processors::heartbeat {
 
     class HeartbeatProcessor : public BaseProcessor {
     public:
-        void processHeartbeatRequest(const connector::models::heartbeat::HeartbeatRequest &request) {
-            // TODO: Process heartbeat request
-            // TODO: Get current driver status
-            // TODO: Create HeartbeatResponse
-            // TODO: Call HeartbeatSender to send response
-            (void) request;
-        }
+        HeartbeatProcessor(std::shared_ptr<events::heartbeat::HeartbeatSender> sender,
+                           std::shared_ptr<core::DriverInterface> driver,
+                           const std::string &driverId);
+
+        void processHeartbeatRequest(const std::string &messageJson, const std::string &key);
 
         std::string getProcessorName() const override {
             return "HeartbeatProcessor";
         }
 
         bool isReady() const override {
-            // TODO: Check if processor dependencies are ready
-            return false;
+            return sender_ && sender_->isReady() && driver_ != nullptr;
         }
+
+    private:
+        std::shared_ptr<events::heartbeat::HeartbeatSender> sender_;
+        std::shared_ptr<core::DriverInterface> driver_;
+        std::string driverId_;
+
+        std::string getDriverStatusCode() const;
     };
 
 }

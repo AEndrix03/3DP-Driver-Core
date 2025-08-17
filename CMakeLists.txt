@@ -13,109 +13,77 @@ set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
 
 # Zlib setup
-set(ZLIB_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/external/zlib")
-set(ZLIB_LIBRARY zlibstatic)
-set(ZLIB_LIBRARIES zlibstatic)
-
 add_subdirectory(external/zlib)
 
-# Collect all source files (excluding test files)
-file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS
-        src/*.cpp
+# Find librdkafka (Windows)
+find_path(LIBRDKAFKA_INCLUDE_DIR
+        NAMES librdkafka/rdkafka.h
+        PATHS
+        ${CMAKE_PREFIX_PATH}/include
+        "C:/vcpkg/installed/x64-windows/include"
+        "C:/vcpkg/installed/x86-windows/include"
 )
-list(FILTER SOURCES EXCLUDE REGEX ".*main_.*test.*\\.cpp$")
 
-# Collect all connector header files (header-only for now)
-file(GLOB_RECURSE CONNECTOR_HEADERS CONFIGURE_DEPENDS
-        include/connector/models/*.hpp
-        include/connector/events/*.hpp
-        include/connector/processors/*.hpp
+find_library(LIBRDKAFKA_LIBRARY
+        NAMES rdkafka
+        PATHS
+        ${CMAKE_PREFIX_PATH}/lib
+        "C:/vcpkg/installed/x64-windows/lib"
+        "C:/vcpkg/installed/x86-windows/lib"
 )
+
+if (NOT LIBRDKAFKA_INCLUDE_DIR OR NOT LIBRDKAFKA_LIBRARY)
+    message(FATAL_ERROR "librdkafka not found! Install with: vcpkg install librdkafka")
+endif ()
+
+# Collect sources
+file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS src/*.cpp)
+list(FILTER SOURCES EXCLUDE REGEX ".*main_.*\\.cpp$")
+
+file(GLOB_RECURSE CONNECTOR_SOURCES CONFIGURE_DEPENDS src/connector/*.cpp)
 
 # Main executable
 add_executable(3DP_Driver_Core
+        src/main.cpp
         ${SOURCES}
+        ${CONNECTOR_SOURCES}
         external/serial/src/serial.cc
         external/serial/src/impl/win.cc
 )
 
-# Static library (without main.cpp)
-file(GLOB_RECURSE LIB_SOURCES CONFIGURE_DEPENDS
-        src/*.cpp
-)
-list(FILTER LIB_SOURCES EXCLUDE REGEX ".*main.*\\.cpp$")
-
+# Static library
 add_library(3dp_driver STATIC
-        ${LIB_SOURCES}
+        ${SOURCES}
+        ${CONNECTOR_SOURCES}
         external/serial/src/serial.cc
         external/serial/src/impl/win.cc
 )
 
-# Test executables
-add_executable(3DP_EventSystem_Test
-        src/main_eventbus_test.cpp
-        ${LIB_SOURCES}
-        external/serial/src/serial.cc
-        external/serial/src/impl/win.cc
-)
-
-# Connector Models Test (new)
-add_executable(3DP_Connector_Models_Test
-        src/main_connector_test.cpp
-        ${LIB_SOURCES}
-        external/serial/src/serial.cc
-        external/serial/src/impl/win.cc
-)
+# Include directories
+target_include_directories(3DP_Driver_Core PRIVATE ${LIBRDKAFKA_INCLUDE_DIR})
+target_include_directories(3dp_driver PRIVATE ${LIBRDKAFKA_INCLUDE_DIR})
 
 # Link libraries
-target_link_libraries(3DP_Driver_Core PRIVATE zlibstatic)
-target_link_libraries(3dp_driver PRIVATE zlibstatic)
-target_link_libraries(3DP_EventSystem_Test PRIVATE zlibstatic)
-target_link_libraries(3DP_Connector_Models_Test PRIVATE zlibstatic)
+target_link_libraries(3DP_Driver_Core PRIVATE
+        zlibstatic
+        ${LIBRDKAFKA_LIBRARY}
+        ws2_32
+        secur32
+        crypt32
+)
 
-# Compiler warnings
+target_link_libraries(3dp_driver PRIVATE
+        zlibstatic
+        ${LIBRDKAFKA_LIBRARY}
+        ws2_32
+        secur32
+        crypt32
+)
+
+# MSVC settings
 if (MSVC)
-    target_compile_options(3DP_Driver_Core PRIVATE /W4 /WX-)
-    target_compile_options(3dp_driver PRIVATE /W4 /WX-)
-    target_compile_options(3DP_EventSystem_Test PRIVATE /W4 /WX-)
-    target_compile_options(3DP_Connector_Models_Test PRIVATE /W4 /WX-)
-else ()
-    target_compile_options(3DP_Driver_Core PRIVATE -Wall -Wextra -Wpedantic -Wno-unused-parameter)
-    target_compile_options(3dp_driver PRIVATE -Wall -Wextra -Wpedantic -Wno-unused-parameter)
-    target_compile_options(3DP_EventSystem_Test PRIVATE -Wall -Wextra -Wpedantic -Wno-unused-parameter)
-    target_compile_options(3DP_Connector_Models_Test PRIVATE -Wall -Wextra -Wpedantic -Wno-unused-parameter)
+    target_compile_options(3DP_Driver_Core PRIVATE /W4)
+    target_compile_options(3dp_driver PRIVATE /W4)
+    target_compile_definitions(3DP_Driver_Core PRIVATE _CRT_SECURE_NO_WARNINGS)
+    target_compile_definitions(3dp_driver PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif ()
-
-# Debug/Release postfix
-set_target_properties(3DP_Driver_Core 3dp_driver 3DP_EventSystem_Test 3DP_Connector_Models_Test
-        PROPERTIES
-        DEBUG_POSTFIX "_d"
-        RELEASE_POSTFIX ""
-)
-
-# Custom target to show connector structure
-add_custom_target(show_connector_structure
-        COMMAND ${CMAKE_COMMAND} -E echo "=== Connector Structure ==="
-        COMMAND ${CMAKE_COMMAND} -E echo "Models: ${CMAKE_SOURCE_DIR}/include/connector/models/"
-        COMMAND ${CMAKE_COMMAND} -E echo "Events: ${CMAKE_SOURCE_DIR}/include/connector/events/"
-        COMMAND ${CMAKE_COMMAND} -E echo "Processors: ${CMAKE_SOURCE_DIR}/include/connector/processors/"
-        COMMAND find ${CMAKE_SOURCE_DIR}/include/connector/ -name "*.hpp" -type f | sort
-)
-
-# Installation
-install(TARGETS 3DP_Driver_Core 3dp_driver
-        RUNTIME DESTINATION bin
-        LIBRARY DESTINATION lib
-        ARCHIVE DESTINATION lib)
-
-install(DIRECTORY include/ DESTINATION include
-        FILES_MATCHING PATTERN "*.hpp")
-
-# Print configuration summary
-message(STATUS "3DP Driver Core Configuration:")
-message(STATUS "  - C++ Standard: ${CMAKE_CXX_STANDARD}")
-message(STATUS "  - Build Type: ${CMAKE_BUILD_TYPE}")
-message(STATUS "  - Connector Models: ${CMAKE_SOURCE_DIR}/include/connector/models/")
-message(STATUS "  - Connector Events: ${CMAKE_SOURCE_DIR}/include/connector/events/")
-message(STATUS "  - Connector Processors: ${CMAKE_SOURCE_DIR}/include/connector/processors/")
-message(STATUS "  - Total Header Files: ${CMAKE_SOURCE_DIR}/include/connector/")
