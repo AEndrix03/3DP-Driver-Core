@@ -10,3 +10,6 @@
 [submodule "external/librdkafka"]
 	path = external/librdkafka
 	url = https://github.com/confluentinc/librdkafka
+[submodule "external/boringssl"]
+	path = external/boringssl
+	url = https://github.com/google/boringssl
