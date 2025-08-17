@@ -49,10 +49,8 @@ void initializeDispatchers(translator::gcode::GCodeTranslator &translator) {
 connector::kafka::KafkaConfig createKafkaConfig() {
     connector::kafka::KafkaConfig config;
 
-    // TODO: Load from config file or environment
-    config.brokers = "localhost:9092";
-    config.driverId = "driver_001";
-    config.consumerGroupId = "printer-driver_001";
+    config.resolveFromEnvironment();
+    config.printConfig();
 
     return config;
 }
@@ -66,26 +64,44 @@ int main() {
 
         Logger::logInfo("Starting 3DP Driver and Translator...");
 
-        // Initialize hardware components
-        std::string portName = "COM4"; // TODO: Load from config
-        auto serialPort = std::make_shared<core::RealSerialPort>(portName, 115200);
+        // Create and resolve config
+        auto kafkaConfig = createKafkaConfig();
+
+        // Initialize hardware components using resolved config
+        auto serialPort = std::make_shared<core::RealSerialPort>(
+                kafkaConfig.serialPort,
+                kafkaConfig.serialBaudrate
+        );
         auto printer = std::make_shared<core::RealPrinter>(serialPort);
         auto driver = std::make_shared<core::DriverInterface>(printer, serialPort);
 
         printer->initialize();
-        Logger::logInfo("Hardware initialized on port: " + portName);
+        Logger::logInfo("Hardware initialized on port: " + kafkaConfig.serialPort);
 
         // Initialize GCode translator
         translator::gcode::GCodeTranslator translator(driver);
         initializeDispatchers(translator);
 
         // Initialize and start HeartbeatController
-        auto kafkaConfig = createKafkaConfig();
-        auto heartbeatController = std::make_unique<connector::controllers::HeartbeatController>(
-                kafkaConfig, driver
-        );
-        heartbeatController->start();
-        Logger::logInfo("HeartbeatController started");
+        Logger::logInfo("Initializing HeartbeatController...");
+        std::unique_ptr<connector::controllers::HeartbeatController> heartbeatController;
+
+        try {
+            heartbeatController = std::make_unique<connector::controllers::HeartbeatController>(
+                    kafkaConfig, driver
+            );
+            heartbeatController->start();
+
+            if (heartbeatController->isRunning()) {
+                Logger::logInfo("HeartbeatController started successfully");
+            } else {
+                Logger::logWarning("HeartbeatController created but not running (Kafka connection issues?)");
+            }
+        } catch (const std::exception &e) {
+            Logger::logError("Failed to create HeartbeatController: " + std::string(e.what()));
+            Logger::logInfo("Continuing without Kafka functionality...");
+            heartbeatController = nullptr;
+        }
 
         // Initialize and start general connector
         /*auto connector = connector::controllers::HeartbeatController;

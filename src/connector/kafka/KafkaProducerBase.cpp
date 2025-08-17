@@ -6,11 +6,24 @@ namespace connector::kafka {
 
     KafkaProducerBase::KafkaProducerBase(const KafkaConfig &config, const std::string &topicName)
             : config_(config), topicName_(topicName), producer_(nullptr), ready_(false) {
-        createProducer();
+
+        Logger::logInfo("[KafkaProducerBase] Initializing producer for topic: " + topicName);
+
+        try {
+            createProducer();
+        } catch (const std::exception &e) {
+            Logger::logError("[KafkaProducerBase] Failed to initialize producer: " + std::string(e.what()));
+            // Non rethrow - lascia il producer in stato non-ready ma non crasha
+            ready_ = false;
+        }
     }
 
     KafkaProducerBase::~KafkaProducerBase() {
-        destroyProducer();
+        try {
+            destroyProducer();
+        } catch (...) {
+            // Ignora errori nel distruttore
+        }
     }
 
     bool KafkaProducerBase::sendMessage(const std::string &message, const std::string &key) {
@@ -19,29 +32,34 @@ namespace connector::kafka {
             return false;
         }
 
-        const char *keyPtr = key.empty() ? nullptr : key.c_str();
-        size_t keyLen = key.empty() ? 0 : key.length();
+        try {
+            const char *keyPtr = key.empty() ? nullptr : key.c_str();
+            size_t keyLen = key.empty() ? 0 : key.length();
 
-        int result = rd_kafka_producev(
-                producer_,
-                RD_KAFKA_V_TOPIC(topicName_.c_str()),
-                RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_COPY),
-                RD_KAFKA_V_VALUE((void *) message.c_str(), message.length()),
-                RD_KAFKA_V_KEY((void *) keyPtr, keyLen),
-                RD_KAFKA_V_OPAQUE(nullptr),
-                RD_KAFKA_V_END
-        );
+            int result = rd_kafka_producev(
+                    producer_,
+                    RD_KAFKA_V_TOPIC(topicName_.c_str()),
+                    RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_COPY),
+                    RD_KAFKA_V_VALUE((void *) message.c_str(), message.length()),
+                    RD_KAFKA_V_KEY((void *) keyPtr, keyLen),
+                    RD_KAFKA_V_OPAQUE(nullptr),
+                    RD_KAFKA_V_END
+            );
 
-        if (result != RD_KAFKA_RESP_ERR_NO_ERROR) {
-            Logger::logError("[" + getSenderName() + "] Failed to produce message: " +
-                             std::string(rd_kafka_err2str(static_cast<rd_kafka_resp_err_t>(result))));
+            if (result != RD_KAFKA_RESP_ERR_NO_ERROR) {
+                Logger::logError("[" + getSenderName() + "] Failed to produce message: " +
+                                 std::string(rd_kafka_err2str(static_cast<rd_kafka_resp_err_t>(result))));
+                return false;
+            }
+
+            rd_kafka_poll(producer_, 0);
+            Logger::logInfo("[" + getSenderName() + "] Message sent to topic: " + topicName_ + ", key: " + key);
+            return true;
+
+        } catch (const std::exception &e) {
+            Logger::logError("[" + getSenderName() + "] Exception sending message: " + std::string(e.what()));
             return false;
         }
-
-        rd_kafka_poll(producer_, 0);
-
-        Logger::logInfo("[" + getSenderName() + "] Message sent to topic: " + topicName_ + ", key: " + key);
-        return true;
     }
 
     bool KafkaProducerBase::isReady() const {
@@ -54,51 +72,78 @@ namespace connector::kafka {
 
     void KafkaProducerBase::createProducer() {
         char errstr[512];
+        errstr[0] = '\0';
 
+        Logger::logInfo("[KafkaProducerBase] Creating librdkafka producer configuration...");
         rd_kafka_conf_t *conf = rd_kafka_conf_new();
-
-        // Basic configuration
-        rd_kafka_conf_set(conf, "bootstrap.servers", config_.brokers.c_str(), errstr, sizeof(errstr));
-        rd_kafka_conf_set(conf, "client.id", config_.clientId.c_str(), errstr, sizeof(errstr));
-
-        // Producer specific
-        rd_kafka_conf_set(conf, "delivery.timeout.ms", std::to_string(config_.deliveryTimeoutMs).c_str(), errstr,
-                          sizeof(errstr));
-        rd_kafka_conf_set(conf, "request.timeout.ms", std::to_string(config_.requestTimeoutMs).c_str(), errstr,
-                          sizeof(errstr));
-        rd_kafka_conf_set(conf, "compression.type", config_.compressionType.c_str(), errstr, sizeof(errstr));
-        rd_kafka_conf_set(conf, "batch.size", std::to_string(config_.batchSize).c_str(), errstr, sizeof(errstr));
-        rd_kafka_conf_set(conf, "linger.ms", std::to_string(config_.lingerMs).c_str(), errstr, sizeof(errstr));
-
-        // Security configuration
-        if (config_.enableSsl) {
-            rd_kafka_conf_set(conf, "security.protocol", "SSL", errstr, sizeof(errstr));
+        if (!conf) {
+            throw std::runtime_error("Failed to create Kafka producer configuration object");
         }
 
-        if (!config_.saslMechanism.empty()) {
-            rd_kafka_conf_set(conf, "sasl.mechanism", config_.saslMechanism.c_str(), errstr, sizeof(errstr));
+        try {
+            // Basic configuration con controllo errori
+            Logger::logInfo("[KafkaProducerBase] Setting brokers: " + config_.brokers);
+            if (rd_kafka_conf_set(conf, "bootstrap.servers", config_.brokers.c_str(), errstr, sizeof(errstr)) !=
+                RD_KAFKA_CONF_OK) {
+                throw std::runtime_error("Failed to set bootstrap.servers: " + std::string(errstr));
+            }
+
+            Logger::logInfo("[KafkaProducerBase] Setting client.id: " + config_.clientId);
+            if (rd_kafka_conf_set(conf, "client.id", config_.clientId.c_str(), errstr, sizeof(errstr)) !=
+                RD_KAFKA_CONF_OK) {
+                throw std::runtime_error("Failed to set client.id: " + std::string(errstr));
+            }
+
+            // Producer specific settings
+            Logger::logInfo("[KafkaProducerBase] Setting producer-specific configuration...");
+            rd_kafka_conf_set(conf, "delivery.timeout.ms", std::to_string(config_.deliveryTimeoutMs).c_str(), errstr,
+                              sizeof(errstr));
+            rd_kafka_conf_set(conf, "request.timeout.ms", std::to_string(config_.requestTimeoutMs).c_str(), errstr,
+                              sizeof(errstr));
+            rd_kafka_conf_set(conf, "compression.type", config_.compressionType.c_str(), errstr, sizeof(errstr));
+            rd_kafka_conf_set(conf, "batch.size", std::to_string(config_.batchSize).c_str(), errstr, sizeof(errstr));
+            rd_kafka_conf_set(conf, "linger.ms", std::to_string(config_.lingerMs).c_str(), errstr, sizeof(errstr));
+
+            // Impostazioni di timeout più aggressive
+            rd_kafka_conf_set(conf, "socket.timeout.ms", "10000", errstr, sizeof(errstr));
+            rd_kafka_conf_set(conf, "socket.keepalive.enable", "true", errstr, sizeof(errstr));
+
+            // Set callbacks
+            rd_kafka_conf_set_dr_msg_cb(conf, deliveryReportCallback);
+            rd_kafka_conf_set_error_cb(conf, errorCallback);
+
+            Logger::logInfo("[KafkaProducerBase] Creating Kafka producer instance...");
+            producer_ = rd_kafka_new(RD_KAFKA_PRODUCER, conf, errstr, sizeof(errstr));
+            if (!producer_) {
+                rd_kafka_conf_destroy(conf);
+                throw std::runtime_error("Failed to create Kafka producer: " + std::string(errstr));
+            }
+
+            ready_ = true;
+            Logger::logInfo("[KafkaProducerBase] Producer created and ready");
+
+        } catch (const std::exception &e) {
+            if (conf) rd_kafka_conf_destroy(conf);
+            ready_ = false;
+            throw;
         }
-
-        // Set callbacks
-        rd_kafka_conf_set_dr_msg_cb(conf, deliveryReportCallback);
-        rd_kafka_conf_set_error_cb(conf, errorCallback);
-
-        producer_ = rd_kafka_new(RD_KAFKA_PRODUCER, conf, errstr, sizeof(errstr));
-        if (!producer_) {
-            rd_kafka_conf_destroy(conf);
-            throw std::runtime_error("Failed to create Kafka producer: " + std::string(errstr));
-        }
-
-        ready_ = true;
-        Logger::logInfo("[" + getSenderName() + "] Producer created and ready");
     }
 
     void KafkaProducerBase::destroyProducer() {
         if (producer_) {
-            ready_ = false;
-            rd_kafka_flush(producer_, 10000); // 10 second timeout
-            rd_kafka_destroy(producer_);
-            producer_ = nullptr;
+            try {
+                ready_ = false;
+                Logger::logInfo("[KafkaProducerBase] Flushing producer...");
+                rd_kafka_flush(producer_, 5000); // 5 second timeout
+                Logger::logInfo("[KafkaProducerBase] Destroying producer...");
+                rd_kafka_destroy(producer_);
+                producer_ = nullptr;
+                Logger::logInfo("[KafkaProducerBase] Producer destroyed");
+            } catch (...) {
+                Logger::logError("[KafkaProducerBase] Error destroying producer");
+                producer_ = nullptr;
+                ready_ = false;
+            }
         }
     }
 

@@ -1,22 +1,20 @@
-//
-// Created by redeg on 26/04/2025.
-//
-
 #pragma once
 
-#include "./../SerialPort.hpp"
-#include "serial/serial.h"
+#include "../SerialPort.hpp"
+#include <boost/asio.hpp>
 #include <string>
 #include <memory>
 
 namespace core {
 
 /**
- * @brief Implementazione reale di SerialPort usando la libreria wjwwood/serial.
+ * @brief Implementazione di SerialPort usando Boost.Asio
  */
     class RealSerialPort : public SerialPort {
     public:
         RealSerialPort(const std::string &portName, uint32_t baudrate);
+
+        ~RealSerialPort();
 
         void send(const std::string &data) override;
 
@@ -25,7 +23,11 @@ namespace core {
         bool isOpen() const override;
 
     private:
-        std::unique_ptr<serial::Serial> serial_;
+        boost::asio::io_context io_context_;
+        std::unique_ptr<boost::asio::serial_port> serial_port_;
+        std::string buffer_;
+
+        void configurePort(uint32_t baudrate);
     };
 
 } // namespace core

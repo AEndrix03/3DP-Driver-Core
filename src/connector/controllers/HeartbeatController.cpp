@@ -12,16 +12,31 @@ namespace connector::controllers {
             throw std::invalid_argument("DriverInterface cannot be null");
         }
 
-        receiver_ = std::make_shared<events::heartbeat::HeartbeatReceiver>(config_);
-        sender_ = std::make_shared<events::heartbeat::HeartbeatSender>(config_);
-        processor_ = std::make_shared<processors::heartbeat::HeartbeatProcessor>(sender_,
-                                                                                 driver_, config_.driverId);
+        Logger::logInfo("[HeartbeatController] Initializing for driver: " + config_.driverId);
 
-        receiver_->setMessageCallback([this](const std::string &message, const std::string &key) {
-            onMessageReceived(message, key);
-        });
+        try {
+            // Crea i componenti con gestione errori
+            Logger::logInfo("[HeartbeatController] Creating Kafka components...");
 
-        Logger::logInfo("[HeartbeatController] Created for driver: " + config_.driverId);
+            receiver_ = std::make_shared<events::heartbeat::HeartbeatReceiver>(config_);
+            sender_ = std::make_shared<events::heartbeat::HeartbeatSender>(config_);
+            processor_ = std::make_shared<processors::heartbeat::HeartbeatProcessor>(sender_,
+                                                                                     driver_, config_.driverId);
+
+            // Registra il callback per i messaggi
+            receiver_->setMessageCallback([this](const std::string &message, const std::string &key) {
+                onMessageReceived(message, key);
+            });
+
+            Logger::logInfo("[HeartbeatController] Created successfully for driver: " + config_.driverId);
+
+        } catch (const std::exception &e) {
+            Logger::logError("[HeartbeatController] Failed to initialize: " + std::string(e.what()));
+            // Non rethrow - permetti all'applicazione di continuare senza Kafka
+            receiver_.reset();
+            sender_.reset();
+            processor_.reset();
+        }
     }
 
     HeartbeatController::~HeartbeatController() {
@@ -29,16 +44,25 @@ namespace connector::controllers {
     }
 
     void HeartbeatController::start() {
-        if (running_) return;
+        if (running_) {
+            Logger::logWarning("[HeartbeatController] Already running");
+            return;
+        }
+
+        if (!receiver_ || !sender_ || !processor_) {
+            Logger::logError("[HeartbeatController] Cannot start - components not initialized properly");
+            return;
+        }
 
         try {
+            Logger::logInfo("[HeartbeatController] Starting Kafka receiver...");
             receiver_->startReceiving();
             running_ = true;
-            Logger::logInfo("[HeartbeatController] Started - listening on: " + receiver_->getTopicName());
+            Logger::logInfo("[HeartbeatController] Started successfully - listening on: " + receiver_->getTopicName());
         } catch (const std::exception &e) {
             running_ = false;
             Logger::logError("[HeartbeatController] Failed to start: " + std::string(e.what()));
-            throw;
+            // Non rethrow - continua l'esecuzione senza Kafka
         }
     }
 
@@ -46,8 +70,13 @@ namespace connector::controllers {
         if (!running_) return;
         running_ = false;
 
-        if (receiver_) {
-            receiver_->stopReceiving();
+        try {
+            if (receiver_) {
+                Logger::logInfo("[HeartbeatController] Stopping receiver...");
+                receiver_->stopReceiving();
+            }
+        } catch (const std::exception &e) {
+            Logger::logError("[HeartbeatController] Error stopping receiver: " + std::string(e.what()));
         }
 
         Logger::logInfo("[HeartbeatController] Stopped");
@@ -65,9 +94,13 @@ namespace connector::controllers {
         stats_.messagesReceived++;
 
         try {
-            processor_->processHeartbeatRequest(message, key);
-            stats_.messagesProcessed++;
-            stats_.messagesSent++;
+            if (processor_) {
+                processor_->processHeartbeatRequest(message, key);
+                stats_.messagesProcessed++;
+                stats_.messagesSent++;
+            } else {
+                Logger::logWarning("[HeartbeatController] Processor not available, dropping message");
+            }
         } catch (const std::exception &e) {
             stats_.processingErrors++;
             Logger::logError("[HeartbeatController] Processing failed: " + std::string(e.what()));

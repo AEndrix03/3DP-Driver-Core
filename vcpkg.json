@@ -1,0 +1,11 @@
+{
+  "name": "3dp-driver-core",
+  "version": "1.0.0",
+  "description": "3D Printer Driver Core",
+  "dependencies": [
+    "librdkafka",
+    "nlohmann-json",
+    "boost-system",
+    "zlib"
+  ]
+}

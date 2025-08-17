@@ -4,86 +4,38 @@ project(3DP_Driver_Core LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Include directories
-include_directories(include)
-include_directories(external/serial/include)
-include_directories(external/nlohmann/json/single_include)
+# Suppress policy warnings
+cmake_policy(SET CMP0167 NEW)
 
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
+# Dependencies (managed by vcpkg.json)
+find_package(RdKafka CONFIG REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
+find_package(Boost REQUIRED COMPONENTS system)
+find_package(ZLIB REQUIRED)
 
-# Zlib setup
-add_subdirectory(external/zlib)
+# Executable
+file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS src/*.cpp)
+add_executable(${PROJECT_NAME} ${SOURCES})
 
-# Find librdkafka (Windows)
-find_path(LIBRDKAFKA_INCLUDE_DIR
-        NAMES librdkafka/rdkafka.h
-        PATHS
-        ${CMAKE_PREFIX_PATH}/include
-        "C:/vcpkg/installed/x64-windows/include"
-        "C:/vcpkg/installed/x86-windows/include"
+target_include_directories(${PROJECT_NAME} PRIVATE include)
+
+target_link_libraries(${PROJECT_NAME} PRIVATE
+        RdKafka::rdkafka++
+        nlohmann_json::nlohmann_json
+        Boost::system
+        ZLIB::ZLIB
 )
 
-find_library(LIBRDKAFKA_LIBRARY
-        NAMES rdkafka
-        PATHS
-        ${CMAKE_PREFIX_PATH}/lib
-        "C:/vcpkg/installed/x64-windows/lib"
-        "C:/vcpkg/installed/x86-windows/lib"
-)
-
-if (NOT LIBRDKAFKA_INCLUDE_DIR OR NOT LIBRDKAFKA_LIBRARY)
-    message(FATAL_ERROR "librdkafka not found! Install with: vcpkg install librdkafka")
+# Platform-specific libraries
+if (WIN32)
+    target_link_libraries(${PROJECT_NAME} PRIVATE ws2_32 setupapi)
+elseif (UNIX)
+    target_link_libraries(${PROJECT_NAME} PRIVATE pthread)
 endif ()
 
-# Collect sources
-file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS src/*.cpp)
-list(FILTER SOURCES EXCLUDE REGEX ".*main_.*\\.cpp$")
-
-file(GLOB_RECURSE CONNECTOR_SOURCES CONFIGURE_DEPENDS src/connector/*.cpp)
-
-# Main executable
-add_executable(3DP_Driver_Core
-        src/main.cpp
-        ${SOURCES}
-        ${CONNECTOR_SOURCES}
-        external/serial/src/serial.cc
-        external/serial/src/impl/win.cc
-)
-
-# Static library
-add_library(3dp_driver STATIC
-        ${SOURCES}
-        ${CONNECTOR_SOURCES}
-        external/serial/src/serial.cc
-        external/serial/src/impl/win.cc
-)
-
-# Include directories
-target_include_directories(3DP_Driver_Core PRIVATE ${LIBRDKAFKA_INCLUDE_DIR})
-target_include_directories(3dp_driver PRIVATE ${LIBRDKAFKA_INCLUDE_DIR})
-
-# Link libraries
-target_link_libraries(3DP_Driver_Core PRIVATE
-        zlibstatic
-        ${LIBRDKAFKA_LIBRARY}
-        ws2_32
-        secur32
-        crypt32
-)
-
-target_link_libraries(3dp_driver PRIVATE
-        zlibstatic
-        ${LIBRDKAFKA_LIBRARY}
-        ws2_32
-        secur32
-        crypt32
-)
-
-# MSVC settings
+# Compiler settings
 if (MSVC)
-    target_compile_options(3DP_Driver_Core PRIVATE /W4)
-    target_compile_options(3dp_driver PRIVATE /W4)
-    target_compile_definitions(3DP_Driver_Core PRIVATE _CRT_SECURE_NO_WARNINGS)
-    target_compile_definitions(3dp_driver PRIVATE _CRT_SECURE_NO_WARNINGS)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE _CRT_SECURE_NO_WARNINGS)
+elseif (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -Wpedantic)
 endif ()
