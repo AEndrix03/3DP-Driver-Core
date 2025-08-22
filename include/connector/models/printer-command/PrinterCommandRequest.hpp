@@ -6,7 +6,7 @@
 namespace connector::models::printer_command {
 
     /**
-     * @brief Printer command request model matching PrinterCommandRequestDto
+     * @brief Printer printer-command request model matching PrinterCommandRequestDto
      */
     class PrinterCommandRequest : public BaseModel {
     public:
@@ -28,7 +28,7 @@ namespace connector::models::printer_command {
             return nlohmann::json{
                     {"requestId", requestId},
                     {"driverId",  driverId},
-                    {"command",   command},
+                    {"printer-command",   command},
                     {"priority",  priority}
             };
         }
@@ -36,7 +36,7 @@ namespace connector::models::printer_command {
         void fromJson(const nlohmann::json &json) override {
             requestId = json.at("requestId").get<std::string>();
             driverId = json.at("driverId").get<std::string>();
-            command = json.at("command").get<std::string>();
+            command = json.at("printer-command").get<std::string>();
             priority = json.at("priority").get<int>();
         }
 

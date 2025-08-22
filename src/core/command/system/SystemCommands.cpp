@@ -38,4 +38,4 @@ namespace core::command::system {
         return sendCommand('S', 10, {});
     }
 
-} // namespace core::command::system
+} // namespace core::printer-command::system

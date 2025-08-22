@@ -3,6 +3,8 @@
 //
 
 #include "translator/GCodeTranslator.hpp"
+#include "translator/exceptions/GCodeTranslatorInvalidCommandException.hpp"
+#include "translator/exceptions/GCodeTranslatorUnknownCommandException.hpp"
 #include "logger/Logger.hpp"
 #include <fstream>
 #include <sstream>
@@ -72,6 +74,8 @@ namespace translator::gcode {
                     std::stringstream ss;
                     ss << "[Translator] Comando non valido: " << command;
                     Logger::logWarning(ss.str());
+
+                    throw GCodeTranslatorInvalidCommandException(command);
                 }
                 return;
             }
@@ -80,6 +84,7 @@ namespace translator::gcode {
         std::stringstream ss;
         ss << "[Translator] Comando non gestito: " << command;
         Logger::logWarning(ss.str());
+        throw GCodeTranslatorUnknownCommandException(command);
     }
 
     void GCodeTranslator::registerDispatcher(std::unique_ptr<ICommandDispatcher> dispatcher) {

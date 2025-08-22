@@ -25,4 +25,4 @@ namespace core::command::temperature {
         types::Result getBedTemperature();
     };
 
-} // namespace core::command::temperature
+} // namespace core::printer-command::temperature

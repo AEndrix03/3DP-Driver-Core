@@ -19,4 +19,4 @@ namespace core::command::history {
         types::Result clearHistory();
     };
 
-} // namespace core::command::history
+} // namespace core::printer-command::history

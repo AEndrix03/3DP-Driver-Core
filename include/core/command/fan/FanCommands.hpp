@@ -21,4 +21,4 @@ namespace core::command::fan {
         types::Result turnOff();
     };
 
-} // namespace core::command::fan
+} // namespace core::printer-command::fan

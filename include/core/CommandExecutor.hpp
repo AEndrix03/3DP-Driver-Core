@@ -26,7 +26,7 @@ namespace core {
 
         /**
          * @brief Invia un comando e attende una risposta valida.
-         * @param command Testo del comando da inviare.
+         * @param printer-command Testo del comando da inviare.
          * @param commandNumber Numero del comando associato.
          * @return Esito dell'operazione.
          */

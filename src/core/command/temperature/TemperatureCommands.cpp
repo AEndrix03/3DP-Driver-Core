@@ -32,4 +32,4 @@ namespace core::command::temperature {
         return sendCommand('T', 21, {});
     }
 
-} // namespace core::command::temperature
+} // namespace core::printer-command::temperature

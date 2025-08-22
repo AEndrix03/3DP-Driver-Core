@@ -15,4 +15,4 @@ namespace core::command {
         return driver_->sendCommandInternal(category, code, params);
     }
 
-} // namespace core::command
+} // namespace core::printer-command

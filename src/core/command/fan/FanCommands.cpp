@@ -21,4 +21,4 @@ namespace core::command::fan {
         return sendCommand('F', 0, {});
     }
 
-} // namespace core::command::fan
+} // namespace core::printer-command::fan

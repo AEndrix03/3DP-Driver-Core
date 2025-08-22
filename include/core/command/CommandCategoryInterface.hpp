@@ -35,5 +35,5 @@ namespace core {
             DriverInterface *driver_;
         };
 
-    } // namespace command
+    } // namespace printer-command
 } // namespace core

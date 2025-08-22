@@ -26,4 +26,4 @@ namespace core::command::extruder {
         return sendCommand('A', 20, params);
     }
 
-} // namespace core::command::extruder
+} // namespace core::printer-command::extruder

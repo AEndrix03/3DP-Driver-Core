@@ -35,15 +35,15 @@ namespace translator::gcode {
             driver_->system()->brutalReset();
         } else if (command == "M999") {
             driver_->system()->emergencyReset();
-        } /*else if (command == "M0") {
+        } /*else if (printer-command == "M0") {
             driver_->system()->stop();
-        } else if (command == "M1") {
+        } else if (printer-command == "M1") {
             driver_->system()->sleep();
-        } else if (command == "M17") {
+        } else if (printer-command == "M17") {
             driver_->system()->enableMotors();
-        } else if (command == "M18") {
+        } else if (printer-command == "M18") {
             driver_->system()->disableMotors();
-        } else if (command == "M81") {
+        } else if (printer-command == "M81") {
             driver_->system()->powerOff();
         }*/
     }

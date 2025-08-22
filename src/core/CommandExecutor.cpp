@@ -78,7 +78,7 @@ namespace core {
 
             retries++;
             if (retries <= maxRetries) {
-                Logger::logWarning("[Retry] Resending command N" + std::to_string(expectedNumber) + " (" +
+                Logger::logWarning("[Retry] Resending printer-command N" + std::to_string(expectedNumber) + " (" +
                                    std::to_string(retries) + "/" + std::to_string(maxRetries) + ")");
                 serial_->send(command);
             } else {
@@ -126,7 +126,7 @@ namespace core {
                     throw types::ResendFailedException();
                 }
 
-                Logger::logWarning("[RESEND] Resending command N" + std::to_string(requestedNumber));
+                Logger::logWarning("[RESEND] Resending printer-command N" + std::to_string(requestedNumber));
                 serial_->send(resendCommand);
                 return sendCommandAndAwaitResponse(resendCommand, requestedNumber);
             }

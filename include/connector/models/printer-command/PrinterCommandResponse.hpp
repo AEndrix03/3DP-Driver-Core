@@ -6,7 +6,7 @@
 namespace connector::models::printer_command {
 
     /**
-     * @brief Printer command response model matching PrinterCommandResponseDto
+     * @brief Printer printer-command response model matching PrinterCommandResponseDto
      */
     class PrinterCommandResponse : public BaseModel {
     public:

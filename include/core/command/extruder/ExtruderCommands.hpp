@@ -21,4 +21,4 @@ namespace core::command::extruder {
         types::Result retract(float millimeters, float feedrate);
     };
 
-} // namespace core::command::extruder
+} // namespace core::printer-command::extruder

@@ -22,7 +22,7 @@ public:
 
 class ResendFailedException : public DriverException {
 public:
-    ResendFailedException() : DriverException("Failed to resend command correctly") {}
+    ResendFailedException() : DriverException("Failed to resend printer-command correctly") {}
 };
 
 }

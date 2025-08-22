@@ -14,4 +14,4 @@ namespace core::command::history {
         return sendCommand('H', 0, {});
     }
 
-} // namespace core::command::history
+} // namespace core::printer-command::history

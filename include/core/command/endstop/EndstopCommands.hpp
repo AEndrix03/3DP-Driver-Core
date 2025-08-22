@@ -19,4 +19,4 @@ namespace core::command::endstop {
         types::Result readEndstopStatus();
     };
 
-} // namespace core::command::endstop
+} // namespace core::printer-command::endstop

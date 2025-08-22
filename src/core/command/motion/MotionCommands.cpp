@@ -69,4 +69,4 @@ namespace core::command::motion {
     }
 
 
-} // namespace core::command::motion
+} // namespace core::printer-command::motion

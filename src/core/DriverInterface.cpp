@@ -52,9 +52,9 @@ namespace core {
 
     types::Result DriverInterface::sendCustomCommand(const std::string &rawCommand) {
         if (!printer_->sendCommand(rawCommand)) {
-            return {types::ResultCode::Error, "Failed to send custom command."};
+            return {types::ResultCode::Error, "Failed to send custom printer-command."};
         }
-        return {types::ResultCode::Success, "Custom command sent."};
+        return {types::ResultCode::Success, "Custom printer-command sent."};
     }
 
     PrintState DriverInterface::getState() const {

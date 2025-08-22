@@ -31,4 +31,4 @@ namespace core::command::system {
         types::Result printStatus();
     };
 
-} // namespace core::command::system
+} // namespace core::printer-command::system

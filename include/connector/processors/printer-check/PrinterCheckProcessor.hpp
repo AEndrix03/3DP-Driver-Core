@@ -14,7 +14,7 @@ namespace connector::processors::printer_check {
             // TODO: Get temperature data (extruder, bed)
             // TODO: Get fan status and speed
             // TODO: Get job status and progress
-            // TODO: Get command history and logs
+            // TODO: Get printer-command history and logs
             // TODO: Create comprehensive PrinterCheckResponse
             // TODO: Call PrinterCheckSender to send response
             (void) request;

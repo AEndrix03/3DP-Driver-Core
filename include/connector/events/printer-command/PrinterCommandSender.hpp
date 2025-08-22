@@ -1,27 +1,14 @@
 #pragma once
 
-#include "../BaseSender.hpp"
+#include "../../kafka/KafkaProducerBase.hpp"
 
 namespace connector::events::printer_command {
 
-    class PrinterCommandSender : public BaseSender {
+    class PrinterCommandSender : public kafka::KafkaProducerBase {
     public:
-        bool sendMessage(const std::string &message, const std::string &key = "") override {
-            // TODO: Send to printer-command-response topic via Kafka producer
-            (void) message;
-            (void) key;
-            return false;
-        }
+        explicit PrinterCommandSender(const kafka::KafkaConfig &config);
 
-        bool isReady() const override {
-            // TODO: Check Kafka producer readiness
-            return false;
-        }
-
-        std::string getTopicName() const override {
-            return "printer-command-response";
-        }
-
+    protected:
         std::string getSenderName() const override {
             return "PrinterCommandSender";
         }

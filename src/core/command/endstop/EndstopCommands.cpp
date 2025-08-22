@@ -14,4 +14,4 @@ namespace core::command::endstop {
         return sendCommand('E', 10, {});
     }
 
-} // namespace core::command::endstop
+} // namespace core::printer-command::endstop
