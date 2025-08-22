@@ -1,13 +1,22 @@
-#include "connector/processors/heartbeat/HeartbeatProcessor.hpp"
+#include "connector/processors/printer-command/PrinterCommandProcessor.hpp"
+#include "connector/events/printer-command/PrinterCommandSender.hpp"
+#include "connector/models/printer-command/PrinterCommandRequest.hpp"
+#include "connector/models/printer-command/PrinterCommandResponse.hpp"
+
 #include "logger/Logger.hpp"
 #include <nlohmann/json.hpp>
 
-namespace connector::processors::printer_command {
+#include "translator/GCodeTranslator.hpp"
+#include "translator/exceptions/GCodeTranslatorInvalidCommandException.hpp"
+#include "translator/exceptions/GCodeTranslatorUnknownCommandException.hpp"
 
-    PrinterCommandProcessor::PrinterCommandProcessor(std::shared_ptr<events::printer-command::PrinterCommandSender> sender,
-                               std::shared_ptr<translator::gcode::GCodeTranslator> translator,
-                                const std::string &driverId)
-            : sender_(sender), translator_(translator), driverId_(driverId) {
+
+namespace connector::processors::printer_command {
+    PrinterCommandProcessor::PrinterCommandProcessor(
+        std::shared_ptr<events::printer_command::PrinterCommandSender> sender,
+        std::shared_ptr<translator::gcode::GCodeTranslator> translator,
+        const std::string &driverId)
+        : sender_(sender), translator_(translator), driverId_(driverId) {
     }
 
     void PrinterCommandProcessor::dispatch(const connector::models::printer_command::PrinterCommandRequest &request) {
@@ -23,10 +32,12 @@ namespace connector::processors::printer_command {
             try {
                 translator->parseLine(_request.command);
             } catch (const GCodeTranslatorInvalidCommandException &e) {
-                connector::models::printer_command::PrinterCommandResponse response(driverId_, _request.requestId, false, "GCodeTranslatorInvalidCommandException", e.message);
+                connector::models::printer_command::PrinterCommandResponse response(
+                    driverId_, _request.requestId, false, "GCodeTranslatorInvalidCommandException", e.message);
                 return;
             } catch (const GCodeTranslatorUnknownCommandException &e) {
-                connector::models::printer_command::PrinterCommandResponse response(driverId_, _request.requestId, false, "GCodeTranslatorUnknownCommandException", e.message);
+                connector::models::printer_command::PrinterCommandResponse response(
+                    driverId_, _request.requestId, false, "GCodeTranslatorUnknownCommandException", e.message);
                 return;
             }
 
@@ -46,12 +57,12 @@ namespace connector::processors::printer_command {
             } else {
                 Logger::logError("[PrinterCommandProcessor] Failed to send command response");
             }
-
         } catch (const std::exception &e) {
             Logger::logError("[PrinterCommandProcessor] Processing error: " + std::string(e.what()));
 
             try {
-                connector::models::printer_command::PrinterCommandResponse response(driverId_, _request.requestId, false, "ERROR", e.message);
+                connector::models::printer_command::PrinterCommandResponse response(
+                    driverId_, _request.requestId, false, "ERROR", e.message);
                 nlohmann::json errorJson = errorResponse.toJson();
                 sender_->sendMessage(errorJson.dump(), driverId_);
             } catch (...) {
@@ -59,5 +70,4 @@ namespace connector::processors::printer_command {
             }
         }
     }
-
 }

@@ -2,12 +2,13 @@
 #include "logger/Logger.hpp"
 #include <nlohmann/json.hpp>
 
-namespace connector::processors::heartbeat {
+#include "connector/models/heartbeat/HeartbeatRequest.hpp"
 
+namespace connector::processors::heartbeat {
     HeartbeatProcessor::HeartbeatProcessor(std::shared_ptr<events::heartbeat::HeartbeatSender> sender,
                                            std::shared_ptr<core::DriverInterface> driver,
                                            const std::string &driverId)
-            : sender_(sender), driver_(driver), driverId_(driverId) {
+        : sender_(sender), driver_(driver), driverId_(driverId) {
     }
 
     void HeartbeatProcessor::processHeartbeatRequest(const std::string &messageJson, const std::string &key) {
@@ -42,7 +43,6 @@ namespace connector::processors::heartbeat {
             } else {
                 Logger::logError("[HeartbeatProcessor] Failed to send heartbeat response");
             }
-
         } catch (const std::exception &e) {
             Logger::logError("[HeartbeatProcessor] Processing error: " + std::string(e.what()));
 
@@ -77,5 +77,4 @@ namespace connector::processors::heartbeat {
                 return "UNK";
         }
     }
-
 }

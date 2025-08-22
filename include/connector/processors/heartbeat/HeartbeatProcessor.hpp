@@ -1,14 +1,12 @@
 #pragma once
 
 #include "../BaseProcessor.hpp"
-#include "../../models/heartbeat/HeartbeatRequest.hpp"
 #include "../../models/heartbeat/HeartbeatResponse.hpp"
 #include "../../events/heartbeat/HeartbeatSender.hpp"
 #include "core/DriverInterface.hpp"
 #include <memory>
 
 namespace connector::processors::heartbeat {
-
     class HeartbeatProcessor : public BaseProcessor {
     public:
         HeartbeatProcessor(std::shared_ptr<events::heartbeat::HeartbeatSender> sender,
@@ -32,5 +30,4 @@ namespace connector::processors::heartbeat {
 
         std::string getDriverStatusCode() const;
     };
-
 }
