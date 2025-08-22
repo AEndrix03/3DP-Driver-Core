@@ -43,6 +43,8 @@ namespace connector::controllers {
         bool running_;
 
         void onMessageReceived(const std::string &message, const std::string &key);
+
+        void printDebugStatus() const;
     };
 
 } // namespace connector::controllers

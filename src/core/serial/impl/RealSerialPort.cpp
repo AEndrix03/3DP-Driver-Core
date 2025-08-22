@@ -4,10 +4,8 @@
 #include <iostream>
 
 namespace core {
-
     RealSerialPort::RealSerialPort(const std::string &portName, uint32_t baudrate)
-            : io_context_(), serial_port_(nullptr) {
-
+        : io_context_(), serial_port_(nullptr) {
         try {
             serial_port_ = std::make_unique<boost::asio::serial_port>(io_context_, portName);
             configurePort(baudrate);
@@ -54,7 +52,7 @@ namespace core {
 
         // Set parity (none)
         serial_port_->set_option(boost::asio::serial_port_base::parity(
-                boost::asio::serial_port_base::parity::none), ec);
+                                     boost::asio::serial_port_base::parity::none), ec);
         if (ec) {
             Logger::logError("[SerialPort] Failed to set parity: " + ec.message());
             return;
@@ -62,7 +60,7 @@ namespace core {
 
         // Set stop bits (1)
         serial_port_->set_option(boost::asio::serial_port_base::stop_bits(
-                boost::asio::serial_port_base::stop_bits::one), ec);
+                                     boost::asio::serial_port_base::stop_bits::one), ec);
         if (ec) {
             Logger::logError("[SerialPort] Failed to set stop bits: " + ec.message());
             return;
@@ -70,7 +68,7 @@ namespace core {
 
         // Set flow control (none)
         serial_port_->set_option(boost::asio::serial_port_base::flow_control(
-                boost::asio::serial_port_base::flow_control::none), ec);
+                                     boost::asio::serial_port_base::flow_control::none), ec);
         if (ec) {
             Logger::logError("[SerialPort] Failed to set flow control: " + ec.message());
             return;
@@ -112,11 +110,33 @@ namespace core {
         std::string line;
 
         try {
-            // Read until newline character
-            boost::asio::read_until(*serial_port_, boost::asio::dynamic_buffer(buffer_), '\n', ec);
+            // Read with timeout
+            boost::asio::steady_timer timer(io_context_);
+            timer.expires_after(std::chrono::seconds(1)); // 1 second timeout
 
-            if (ec && ec != boost::asio::error::eof) {
+            bool timeout = false;
+            timer.async_wait([&](const boost::system::error_code &) {
+                timeout = true;
+                serial_port_->cancel();
+            });
+
+            boost::asio::read_until(*serial_port_, boost::asio::dynamic_buffer(buffer_), '\n', ec);
+            timer.cancel();
+
+            if (timeout) {
+                return ""; // Timeout, return empty (not an error for polling)
+            }
+
+            if (ec) {
+                if (ec == boost::asio::error::operation_aborted) {
+                    return ""; // Normal timeout
+                }
                 Logger::logError("[SerialPort] Read error: " + ec.message());
+
+                // Check if port is still open after error
+                if (!serial_port_->is_open()) {
+                    Logger::logError("[SerialPort] Serial port closed unexpectedly!");
+                }
                 return "";
             }
 
@@ -126,7 +146,6 @@ namespace core {
                 line = buffer_.substr(0, pos);
                 buffer_.erase(0, pos + 1);
 
-                // Remove carriage return if present
                 if (!line.empty() && line.back() == '\r') {
                     line.pop_back();
                 }
@@ -135,9 +154,13 @@ namespace core {
                     Logger::logInfo("[RX] Received: " + line);
                 }
             }
-
         } catch (const boost::system::system_error &e) {
             Logger::logError("[SerialPort] Exception while reading: " + std::string(e.what()));
+
+            // Try to detect if device was unplugged
+            if (!isOpen()) {
+                Logger::logError("[SerialPort] Device appears to be disconnected!");
+            }
             return "";
         }
 
@@ -147,5 +170,4 @@ namespace core {
     bool RealSerialPort::isOpen() const {
         return serial_port_ && serial_port_->is_open();
     }
-
 } // namespace core

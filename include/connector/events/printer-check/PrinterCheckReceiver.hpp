@@ -1,31 +1,17 @@
 #pragma once
 
-#include "../BaseReceiver.hpp"
+#include "../../kafka/KafkaConsumerBase.hpp"
 
 namespace connector::events::printer_check {
-
-    class PrinterCheckReceiver : public BaseReceiver {
+    class PrinterCheckReceiver : public kafka::KafkaConsumerBase {
     public:
-        void startReceiving() override {
-            // TODO: Implement Kafka consumer for printer-check-request topic
+        explicit PrinterCheckReceiver(const kafka::KafkaConfig &config)
+            : kafka::KafkaConsumerBase(config, "printer-check-request") {
         }
 
-        void stopReceiving() override {
-            // TODO: Stop Kafka consumer
-        }
-
-        bool isReceiving() const override {
-            // TODO: Check Kafka consumer status
-            return false;
-        }
-
-        std::string getTopicName() const override {
-            return "printer-check-request";
-        }
-
+    protected:
         std::string getReceiverName() const override {
             return "PrinterCheckReceiver";
         }
     };
-
-} 
+}

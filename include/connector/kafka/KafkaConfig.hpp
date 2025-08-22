@@ -3,7 +3,6 @@
 #include <string>
 
 namespace connector::kafka {
-
     struct KafkaConfig {
         // Connection - with Spring Boot style placeholders
         std::string brokers = "${KAFKA_BROKERS:localhost:9092}";
@@ -15,7 +14,7 @@ namespace connector::kafka {
         int pollTimeoutMs = 1000;
         bool autoCommit = true;
         int autoCommitIntervalMs = 5000;
-        std::string autoOffsetReset = "${KAFKA_AUTO_OFFSET_RESET:latest}";
+        std::string autoOffsetReset = "${KAFKA_AUTO_OFFSET_RESET:earliest}";
 
         // Producer settings
         int deliveryTimeoutMs = 30000;
@@ -65,5 +64,4 @@ namespace connector::kafka {
          */
         static void loadEnvFile(const std::string &envFilePath = ".env");
     };
-
 }

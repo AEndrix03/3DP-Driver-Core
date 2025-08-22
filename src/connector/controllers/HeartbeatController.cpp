@@ -3,11 +3,9 @@
 #include <stdexcept>
 
 namespace connector::controllers {
-
     HeartbeatController::HeartbeatController(const kafka::KafkaConfig &config,
                                              std::shared_ptr<core::DriverInterface> driver)
-            : config_(config), driver_(driver), running_(false) {
-
+        : config_(config), driver_(driver), running_(false) {
         if (!driver_) {
             throw std::invalid_argument("DriverInterface cannot be null");
         }
@@ -21,7 +19,7 @@ namespace connector::controllers {
             receiver_ = std::make_shared<events::heartbeat::HeartbeatReceiver>(config_);
             sender_ = std::make_shared<events::heartbeat::HeartbeatSender>(config_);
             processor_ = std::make_shared<processors::heartbeat::HeartbeatProcessor>(sender_,
-                                                                                     driver_, config_.driverId);
+                driver_, config_.driverId);
 
             // Registra il callback per i messaggi
             receiver_->setMessageCallback([this](const std::string &message, const std::string &key) {
@@ -29,7 +27,6 @@ namespace connector::controllers {
             });
 
             Logger::logInfo("[HeartbeatController] Created successfully for driver: " + config_.driverId);
-
         } catch (const std::exception &e) {
             Logger::logError("[HeartbeatController] Failed to initialize: " + std::string(e.what()));
             // Non rethrow - permetti all'applicazione di continuare senza Kafka
@@ -107,4 +104,15 @@ namespace connector::controllers {
         }
     }
 
+    void HeartbeatController::printDebugStatus() const {
+        Logger::logInfo("[HeartbeatController] Debug Status:");
+        Logger::logInfo("  Running: " + std::string(running_ ? "true" : "false"));
+        Logger::logInfo("  Receiver active: " + std::string(receiver_ && receiver_->isReceiving() ? "true" : "false"));
+        Logger::logInfo("  Sender ready: " + std::string(sender_ && sender_->isReady() ? "true" : "false"));
+
+        auto stats = getStatistics();
+        Logger::logInfo("  Messages received: " + std::to_string(stats.messagesReceived));
+        Logger::logInfo("  Messages processed: " + std::to_string(stats.messagesProcessed));
+        Logger::logInfo("  Processing errors: " + std::to_string(stats.processingErrors));
+    }
 } // namespace connector::controllers

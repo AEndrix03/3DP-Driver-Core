@@ -2,14 +2,20 @@
 // Created by Andrea on 22/08/2025.
 //
 
+#pragma once
+
+#include <exception>
+#include <string>
+
 class GCodeTranslatorUnknownCommandException : public std::exception {
 private:
     std::string message;
 
 public:
-    explicit GCodeTranslatorUnknownCommandException(const std::string& msg) : message(msg) {}
+    explicit GCodeTranslatorUnknownCommandException(const std::string &msg) : message(msg) {
+    }
 
-    const char* what() const noexcept override {
+    const char *what() const noexcept override {
         return message.c_str();
     }
 };

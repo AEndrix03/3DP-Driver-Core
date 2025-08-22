@@ -4,10 +4,8 @@
 #include <sstream>
 
 namespace connector::kafka {
-
     KafkaConsumerBase::KafkaConsumerBase(const KafkaConfig &config, const std::string &topicName)
-            : config_(config), topicName_(topicName), consumer_(nullptr), running_(false), receiving_(false) {
-
+        : config_(config), topicName_(topicName), consumer_(nullptr), running_(false), receiving_(false) {
         Logger::logInfo("[KafkaConsumerBase] Initializing consumer for topic: " + topicName);
 
         // Non creare il consumer qui nel costruttore - rimandalo a startReceiving()
@@ -49,7 +47,6 @@ namespace connector::kafka {
             });
 
             Logger::logInfo("[" + getReceiverName() + "] Started receiving from topic: " + topicName_);
-
         } catch (const std::exception &e) {
             receiving_ = false;
             running_ = false;
@@ -155,7 +152,6 @@ namespace connector::kafka {
             }
 
             Logger::logInfo("[" + getReceiverName() + "] Consumer created and subscribed successfully");
-
         } catch (const std::exception &e) {
             if (conf) rd_kafka_conf_destroy(conf);
             throw;
@@ -180,14 +176,32 @@ namespace connector::kafka {
     void KafkaConsumerBase::consumerLoop() {
         Logger::logInfo("[" + getReceiverName() + "] Consumer loop started");
 
+        auto lastMessageTime = std::chrono::steady_clock::now();
+        const auto maxSilenceTime = std::chrono::minutes(5); // Alert after 5min silence
+
         while (running_ && consumer_) {
             try {
                 rd_kafka_message_t *msg = rd_kafka_consumer_poll(consumer_, config_.pollTimeoutMs);
 
-                if (!msg) continue;
+                if (!msg) {
+                    // Check for extended silence
+                    auto now = std::chrono::steady_clock::now();
+                    if (now - lastMessageTime > maxSilenceTime) {
+                        Logger::logWarning("[" + getReceiverName() + "] No messages for " +
+                                           std::to_string(
+                                               std::chrono::duration_cast<std::chrono::minutes>(now - lastMessageTime).
+                                               count()) + " minutes");
+                        lastMessageTime = now; // Reset warning timer
+                    }
+                    continue;
+                }
+
+                lastMessageTime = std::chrono::steady_clock::now();
 
                 if (msg->err != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                    if (msg->err != RD_KAFKA_RESP_ERR__PARTITION_EOF) {
+                    if (msg->err == RD_KAFKA_RESP_ERR__PARTITION_EOF) {
+                        Logger::logInfo("[" + getReceiverName() + "] Reached end of partition");
+                    } else {
                         Logger::logError("[" + getReceiverName() + "] Consumer error: " +
                                          std::string(rd_kafka_message_errstr(msg)));
                     }
@@ -199,22 +213,32 @@ namespace connector::kafka {
                 std::string message(static_cast<const char *>(msg->payload), msg->len);
                 std::string key = msg->key ? std::string(static_cast<const char *>(msg->key), msg->key_len) : "";
 
-                Logger::logInfo("[" + getReceiverName() + "] Received message, key: " + key);
+                Logger::logInfo(
+                    "[" + getReceiverName() + "] Received message, key: " + key + ", size: " + std::to_string(
+                        message.size()));
 
                 if (messageCallback_) {
                     try {
                         messageCallback_(message, key);
                     } catch (const std::exception &e) {
                         Logger::logError(
-                                "[" + getReceiverName() + "] Message processing error: " + std::string(e.what()));
+                            "[" + getReceiverName() + "] Message processing error: " + std::string(e.what()));
                     }
                 }
 
                 rd_kafka_message_destroy(msg);
-
             } catch (const std::exception &e) {
                 Logger::logError("[" + getReceiverName() + "] Error in consumer loop: " + std::string(e.what()));
-                std::this_thread::sleep_for(std::chrono::milliseconds(1000)); // Wait before retry
+
+                // Exponential backoff on errors
+                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            }
+
+            // Periodic health check
+            static int healthCheckCounter = 0;
+            if (++healthCheckCounter % 100 == 0) {
+                // Every 100 polls
+                Logger::logInfo("[" + getReceiverName() + "] Health check - still polling");
             }
         }
 
@@ -225,8 +249,7 @@ namespace connector::kafka {
         (void) rk;
         (void) opaque;
         Logger::logError(
-                "[KafkaConsumer] Error: " + std::string(rd_kafka_err2str(static_cast<rd_kafka_resp_err_t>(err))) +
-                " - " + reason);
+            "[KafkaConsumer] Error: " + std::string(rd_kafka_err2str(static_cast<rd_kafka_resp_err_t>(err))) +
+            " - " + reason);
     }
-
 }
