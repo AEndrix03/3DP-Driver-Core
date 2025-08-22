@@ -6,6 +6,7 @@
     "librdkafka",
     "nlohmann-json",
     "boost-system",
+    "boost-asio",
     "zlib"
   ]
 }
