@@ -16,7 +16,6 @@ namespace connector::processors::printer_command {
 
     void PrinterCommandProcessor::dispatch(const connector::models::printer_command::PrinterCommandRequest &request) {
         Logger::logInfo("[PrinterCommandProcessor] Processing command request id: " + request.requestId);
-
         try {
             // Validate the request
             if (!request.isValid()) {
@@ -25,18 +24,21 @@ namespace connector::processors::printer_command {
                 return;
             }
 
-            // Queue command with priority for asynchronous execution
-            Logger::logInfo("[PrinterCommandProcessor] Queueing command: " + request.command +
-                            " with priority: " + std::to_string(request.priority));
+            // Split command by ';' separator
+            std::vector<std::string> commands = splitCommands(request.command);
+            Logger::logInfo(
+                "[PrinterCommandProcessor] Queueing " + std::to_string(commands.size()) + " command(s) with priority: "
+                + std::to_string(request.priority));
+            // Enqueue all commands with same priority and requestId
+            commandQueue_->enqueueCommands(commands, request.priority, request.requestId);
 
-            commandQueue_->enqueue(request.command, request.priority, request.requestId);
-
-            // Send immediate acknowledgment that command was queued
+            // Send immediate acknowledgment that commands were queued
             connector::models::printer_command::PrinterCommandResponse response(
-                driverId_, request.requestId, true, "", "Command queued for execution");
+                driverId_, request.requestId, true, "",
+                "Commands queued for execution (" + std::to_string(commands.size()) + " commands)");
 
             sendResponse(response);
-            Logger::logInfo("[PrinterCommandProcessor] Command queued successfully: " + request.requestId);
+            Logger::logInfo("[PrinterCommandProcessor] Commands queued successfully: " + request.requestId);
         } catch (const std::exception &e) {
             Logger::logError("[PrinterCommandProcessor] Unexpected error: " + std::string(e.what()));
             sendErrorResponse(request.requestId, "UnexpectedException", e.what());
@@ -64,11 +66,41 @@ namespace connector::processors::printer_command {
         }
     }
 
-    void PrinterCommandProcessor::sendErrorResponse(const std::string &requestId,
-                                                    const std::string &exception,
+    void PrinterCommandProcessor::sendErrorResponse(const std::string &requestId, const std::string &exception,
                                                     const std::string &message) {
         connector::models::printer_command::PrinterCommandResponse errorResponse(
             driverId_, requestId, false, exception, message);
         sendResponse(errorResponse);
+    }
+
+    std::vector<std::string> PrinterCommandProcessor::splitCommands(const std::string &command) {
+        std::vector<std::string> commands;
+        size_t start = 0;
+        size_t pos = 0;
+        // Simple split like Java String.split(";")
+        while ((pos = command.find(';', start)) != std::string::npos) {
+            std::string segment = command.substr(start, pos - start);
+            // Trim whitespace
+            size_t first = segment.find_first_not_of(" \t\r\n");
+            if (first != std::string::npos) {
+                size_t last = segment.find_last_not_of(" \t\r\n");
+                segment = segment.substr(first, last - first + 1);
+                commands.push_back(segment);
+            }
+            start = pos + 1;
+        }
+
+        // Add last segment
+        if (start < command.length()) {
+            std::string segment = command.substr(start);
+            size_t first = segment.find_first_not_of(" \t\r\n");
+            if (first != std::string::npos) {
+                size_t last = segment.find_last_not_of(" \t\r\n");
+                segment = segment.substr(first, last - first + 1);
+                commands.push_back(segment);
+            }
+        }
+
+        return commands.empty() ? std::vector<std::string>{command} : commands;
     }
 }
