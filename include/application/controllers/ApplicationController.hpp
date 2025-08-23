@@ -10,8 +10,11 @@
 #include "connector/controllers/HeartbeatController.hpp"
 #include "connector/kafka/KafkaConfig.hpp"
 #include "translator/GCodeTranslator.hpp"
+#include "core/queue/CommandExecutorQueue.hpp"
 #include "../monitor/SystemMonitor.hpp"
 #include <memory>
+
+#include "connector/controllers/PrinterCommandController.hpp"
 
 class ApplicationController {
 public:
@@ -30,12 +33,17 @@ private:
     std::shared_ptr<core::RealSerialPort> serialPort_;
     std::shared_ptr<core::RealPrinter> printer_;
     std::shared_ptr<core::DriverInterface> driver_;
+
     // Kafka components
     connector::kafka::KafkaConfig kafkaConfig_;
     std::unique_ptr<connector::controllers::HeartbeatController> heartbeatController_;
+    std::unique_ptr<connector::controllers::PrinterCommandController> printerCommandController_;
 
-    // GCode translator
-    std::unique_ptr<translator::gcode::GCodeTranslator> translator_;
+    // GCode translator (shared for queue and controllers)
+    std::shared_ptr<translator::gcode::GCodeTranslator> translator_;
+
+    // Command Executor Queue
+    std::shared_ptr<core::CommandExecutorQueue> commandQueue_;
 
     // System monitoring
     std::unique_ptr<SystemMonitor> monitor_;
@@ -48,4 +56,6 @@ private:
     bool initializeKafkaControllers();
 
     void initializeDispatchers();
+
+    void initializeCommandExecutorQueue();
 };

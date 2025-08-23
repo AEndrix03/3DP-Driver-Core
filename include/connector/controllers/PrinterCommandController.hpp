@@ -9,14 +9,15 @@
 #include "../processors/printer-command/PrinterCommandProcessor.hpp"
 #include "../kafka/KafkaConfig.hpp"
 #include "core/DriverInterface.hpp"
-#include "translator/GCodeTranslator.hpp"
+#include "core/queue/CommandExecutorQueue.hpp"
 #include <memory>
 
 namespace connector::controllers {
     class PrinterCommandController {
     public:
         PrinterCommandController(const kafka::KafkaConfig &config,
-                                 std::shared_ptr<core::DriverInterface> driver);
+                                 std::shared_ptr<core::DriverInterface> driver,
+                                 std::shared_ptr<core::CommandExecutorQueue> commandQueue);
 
         ~PrinterCommandController();
 
@@ -38,7 +39,7 @@ namespace connector::controllers {
     private:
         kafka::KafkaConfig config_;
         std::shared_ptr<core::DriverInterface> driver_;
-        std::shared_ptr<translator::gcode::GCodeTranslator> translator_;
+        std::shared_ptr<core::CommandExecutorQueue> commandQueue_;
 
         std::shared_ptr<events::printer_command::PrinterCommandReceiver> receiver_;
         std::shared_ptr<events::printer_command::PrinterCommandSender> sender_;
@@ -48,7 +49,5 @@ namespace connector::controllers {
         bool running_;
 
         void onMessageReceived(const std::string &message, const std::string &key);
-
-        void initializeTranslator();
     };
 } // namespace connector::controllers

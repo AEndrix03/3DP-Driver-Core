@@ -52,6 +52,11 @@ void ApplicationController::run() {
 void ApplicationController::shutdown() {
     Logger::logInfo("Shutting down application...");
 
+    if (commandQueue_) {
+        commandQueue_->stop();
+        commandQueue_.reset();
+    }
+
     if (monitor_) {
         monitor_->stop();
         monitor_.reset();
@@ -88,9 +93,11 @@ bool ApplicationController::initializeHardware() {
 
 bool ApplicationController::initializeTranslator() {
     try {
-        translator_ = std::make_unique<translator::gcode::GCodeTranslator>(driver_);
+        // Create shared translator for queue and potential other consumers
+        translator_ = std::make_shared<translator::gcode::GCodeTranslator>(driver_);
         initializeDispatchers();
-        Logger::logInfo("GCode translator initialized");
+        initializeCommandExecutorQueue();
+        Logger::logInfo("GCode translator and command queue initialized");
         return true;
     } catch (const std::exception &e) {
         Logger::logError("Translator initialization failed: " + std::string(e.what()));
@@ -104,11 +111,23 @@ bool ApplicationController::initializeKafkaControllers() {
             kafkaConfig_, driver_
         );
         heartbeatController_->start();
+
+        printerCommandController_ = std::make_unique<connector::controllers::PrinterCommandController>(
+            kafkaConfig_, driver_, commandQueue_);
+        printerCommandController_->start();
+
         if (heartbeatController_->isRunning()) {
             Logger::logInfo("HeartbeatController started successfully");
         } else {
             Logger::logWarning("HeartbeatController not running (Kafka issues?)");
         }
+
+        if (printerCommandController_->isRunning()) {
+            Logger::logInfo("PrinterCommandController started successfully");
+        } else {
+            Logger::logWarning("PrinterCommandController not running (Kafka issues?)");
+        }
+
         return true;
     } catch (const std::exception &e) {
         Logger::logError("Kafka initialization failed: " + std::string(e.what()));
@@ -127,4 +146,10 @@ void ApplicationController::initializeDispatchers() {
     translator_->registerDispatcher(std::make_unique<translator::gcode::HistoryDispatcher>(driver_));
 
     Logger::logInfo("All GCode dispatchers registered");
+}
+
+void ApplicationController::initializeCommandExecutorQueue() {
+    commandQueue_ = std::make_unique<core::CommandExecutorQueue>(translator_);
+    commandQueue_->start();
+    Logger::logInfo("Command executor queue initialized and started");
 }

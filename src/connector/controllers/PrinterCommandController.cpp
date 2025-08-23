@@ -8,37 +8,28 @@
 #include <stdexcept>
 #include <nlohmann/json.hpp>
 
-// Dispatcher includes for translator initialization
-#include "translator/dispatchers/motion/MotionDispatcher.hpp"
-#include "translator/dispatchers/system/SystemDispatcher.hpp"
-#include "translator/dispatchers/extruder/ExtruderDispatcher.hpp"
-#include "translator/dispatchers/fan/FanDispatcher.hpp"
-#include "translator/dispatchers/endstop/EndstopDispatcher.hpp"
-#include "translator/dispatchers/temperature/TemperatureDispatcher.hpp"
-#include "translator/dispatchers/history/HistoryDispatcher.hpp"
-
 namespace connector::controllers {
     PrinterCommandController::PrinterCommandController(const kafka::KafkaConfig &config,
-                                                       std::shared_ptr<core::DriverInterface> driver)
-        : config_(config), driver_(driver), running_(false) {
+                                                       std::shared_ptr<core::DriverInterface> driver,
+                                                       std::shared_ptr<core::CommandExecutorQueue> commandQueue)
+        : config_(config), driver_(driver), commandQueue_(commandQueue), running_(false) {
         if (!driver_) {
             throw std::invalid_argument("DriverInterface cannot be null");
+        }
+        if (!commandQueue_) {
+            throw std::invalid_argument("CommandExecutorQueue cannot be null");
         }
 
         Logger::logInfo("[PrinterCommandController] Initializing for driver: " + config_.driverId);
 
         try {
-            // Initialize translator first
-            translator_ = std::make_shared<translator::gcode::GCodeTranslator>(driver_);
-            initializeTranslator();
-
             // Create Kafka components
             Logger::logInfo("[PrinterCommandController] Creating Kafka components...");
 
             receiver_ = std::make_shared<events::printer_command::PrinterCommandReceiver>(config_);
             sender_ = std::make_shared<events::printer_command::PrinterCommandSender>(config_);
             processor_ = std::make_shared<processors::printer_command::PrinterCommandProcessor>(
-                sender_, translator_, config_.driverId);
+                sender_, commandQueue_, config_.driverId);
 
             // Register message callback
             receiver_->setMessageCallback([this](const std::string &message, const std::string &key) {
@@ -137,20 +128,5 @@ namespace connector::controllers {
             stats_.processingErrors++;
             Logger::logError("[PrinterCommandController] Processing failed: " + std::string(e.what()));
         }
-    }
-
-    void PrinterCommandController::initializeTranslator() {
-        if (!translator_) return;
-
-        // Register all dispatchers
-        translator_->registerDispatcher(std::make_unique<translator::gcode::MotionDispatcher>(driver_));
-        translator_->registerDispatcher(std::make_unique<translator::gcode::SystemDispatcher>(driver_));
-        translator_->registerDispatcher(std::make_unique<translator::gcode::ExtruderDispatcher>(driver_));
-        translator_->registerDispatcher(std::make_unique<translator::gcode::FanDispatcher>(driver_));
-        translator_->registerDispatcher(std::make_unique<translator::gcode::EndstopDispatcher>(driver_));
-        translator_->registerDispatcher(std::make_unique<translator::gcode::TemperatureDispatcher>(driver_));
-        translator_->registerDispatcher(std::make_unique<translator::gcode::HistoryDispatcher>(driver_));
-
-        Logger::logInfo("[PrinterCommandController] All GCode dispatchers registered");
     }
 } // namespace connector::controllers

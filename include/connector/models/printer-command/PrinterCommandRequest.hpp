@@ -4,7 +4,6 @@
 #include <string>
 
 namespace connector::models::printer_command {
-
     /**
      * @brief Printer printer-command request model matching PrinterCommandRequestDto
      */
@@ -15,28 +14,30 @@ namespace connector::models::printer_command {
         std::string command;
         int priority;
 
-        PrinterCommandRequest() : priority(0) {}
+        PrinterCommandRequest() : priority(0) {
+        }
 
         PrinterCommandRequest(const std::string &requestId, const std::string &driverId,
                               const std::string &command, int priority)
-                : requestId(requestId), driverId(driverId), command(command), priority(priority) {}
+            : requestId(requestId), driverId(driverId), command(command), priority(priority) {
+        }
 
         explicit PrinterCommandRequest(const nlohmann::json &json) { fromJson(json); }
 
         // BaseModel implementation
         nlohmann::json toJson() const override {
             return nlohmann::json{
-                    {"requestId", requestId},
-                    {"driverId",  driverId},
-                    {"printer-command",   command},
-                    {"priority",  priority}
+                {"requestId", requestId},
+                {"driverId", driverId},
+                {"command", command},
+                {"priority", priority}
             };
         }
 
         void fromJson(const nlohmann::json &json) override {
             requestId = json.at("requestId").get<std::string>();
             driverId = json.at("driverId").get<std::string>();
-            command = json.at("printer-command").get<std::string>();
+            command = json.at("command").get<std::string>();
             priority = json.at("priority").get<int>();
         }
 
@@ -48,5 +49,4 @@ namespace connector::models::printer_command {
             return "PrinterCommandRequest";
         }
     };
-
-} 
+}
