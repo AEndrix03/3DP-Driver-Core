@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "3D Printer Driver Core",
   "dependencies": [
+    "curl",
     "librdkafka",
     "nlohmann-json",
     "boost-system",

@@ -12,6 +12,7 @@ find_package(RdKafka CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(Boost REQUIRED COMPONENTS system)
 find_package(ZLIB REQUIRED)
+find_package(CURL CONFIG REQUIRED)
 
 # Executable
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS src/*.cpp)
@@ -24,6 +25,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
         nlohmann_json::nlohmann_json
         Boost::system
         ZLIB::ZLIB
+        CURL::libcurl
 )
 
 # Platform-specific libraries
