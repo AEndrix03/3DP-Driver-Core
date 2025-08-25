@@ -5,6 +5,8 @@
 #pragma once
 
 #include "connector/controllers/HeartbeatController.hpp"
+#include "connector/controllers/PrinterCommandController.hpp"
+#include "connector/controllers/PrinterCheckController.hpp"
 #include "core/printer/impl/RealPrinter.hpp"
 #include <memory>
 #include <thread>
@@ -13,6 +15,8 @@
 class SystemMonitor {
 public:
     SystemMonitor(std::unique_ptr<connector::controllers::HeartbeatController> &heartbeatController,
+                  std::unique_ptr<connector::controllers::PrinterCommandController> &printerCommandController,
+                  std::unique_ptr<connector::controllers::PrinterCheckController> &printerCheckController,
                   std::shared_ptr<core::RealPrinter> printer);
 
     ~SystemMonitor();
@@ -28,6 +32,8 @@ private:
     std::thread monitorThread_;
 
     std::unique_ptr<connector::controllers::HeartbeatController> &heartbeatController_;
+    std::unique_ptr<connector::controllers::PrinterCommandController> &printerCommandController_;
+    std::unique_ptr<connector::controllers::PrinterCheckController> &printerCheckController_;
     std::shared_ptr<core::RealPrinter> printer_;
 
     void monitorLoop();

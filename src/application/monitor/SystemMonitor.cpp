@@ -3,8 +3,14 @@
 #include <chrono>
 
 SystemMonitor::SystemMonitor(std::unique_ptr<connector::controllers::HeartbeatController> &heartbeatController,
+                             std::unique_ptr<connector::controllers::PrinterCommandController> &
+                             printerCommandController,
+                             std::unique_ptr<connector::controllers::PrinterCheckController> &printerCheckController,
                              std::shared_ptr<core::RealPrinter> printer)
-    : heartbeatController_(heartbeatController), printer_(printer) {
+    : heartbeatController_(heartbeatController),
+      printerCommandController_(printerCommandController),
+      printerCheckController_(printerCheckController),
+      printer_(printer) {
 }
 
 SystemMonitor::~SystemMonitor() {
@@ -68,6 +74,9 @@ void SystemMonitor::checkHardwareStatus() {
 }
 
 void SystemMonitor::reportKafkaStats() {
+    Logger::logInfo("[SystemMonitor] ===== Kafka Controllers Status =====");
+
+    // Heartbeat Controller
     if (heartbeatController_) {
         auto stats = heartbeatController_->getStatistics();
         bool isRunning = heartbeatController_->isRunning();
@@ -77,5 +86,37 @@ void SystemMonitor::reportKafkaStats() {
         Logger::logInfo("  Messages RX: " + std::to_string(stats.messagesReceived));
         Logger::logInfo("  Messages TX: " + std::to_string(stats.messagesSent));
         Logger::logInfo("  Errors: " + std::to_string(stats.processingErrors));
+    } else {
+        Logger::logInfo("[SystemMonitor] Heartbeat Controller: NOT AVAILABLE");
     }
+
+    // Printer Command Controller
+    if (printerCommandController_) {
+        auto stats = printerCommandController_->getStatistics();
+        bool isRunning = printerCommandController_->isRunning();
+
+        Logger::logInfo("[SystemMonitor] PrinterCommand Status:");
+        Logger::logInfo("  Running: " + std::string(isRunning ? "true" : "false"));
+        Logger::logInfo("  Messages RX: " + std::to_string(stats.messagesReceived));
+        Logger::logInfo("  Messages TX: " + std::to_string(stats.messagesSent));
+        Logger::logInfo("  Errors: " + std::to_string(stats.processingErrors));
+    } else {
+        Logger::logInfo("[SystemMonitor] PrinterCommand Controller: NOT AVAILABLE");
+    }
+
+    // Printer Check Controller
+    if (printerCheckController_) {
+        auto stats = printerCheckController_->getStatistics();
+        bool isRunning = printerCheckController_->isRunning();
+
+        Logger::logInfo("[SystemMonitor] PrinterCheck Status:");
+        Logger::logInfo("  Running: " + std::string(isRunning ? "true" : "false"));
+        Logger::logInfo("  Messages RX: " + std::to_string(stats.messagesReceived));
+        Logger::logInfo("  Messages TX: " + std::to_string(stats.messagesSent));
+        Logger::logInfo("  Errors: " + std::to_string(stats.processingErrors));
+    } else {
+        Logger::logInfo("[SystemMonitor] PrinterCheck Controller: NOT AVAILABLE");
+    }
+
+    Logger::logInfo("[SystemMonitor] =======================================");
 }

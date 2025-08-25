@@ -33,7 +33,8 @@ bool ApplicationController::initialize() {
     if (!initializeKafkaControllers()) return false;
 
     // Start system monitor
-    monitor_ = std::make_unique<SystemMonitor>(heartbeatController_, printer_);
+    monitor_ = std::make_unique<SystemMonitor>(heartbeatController_, printerCommandController_, printerCheckController_,
+                                               printer_);
     monitor_->start();
 
     Logger::logInfo("Application initialized successfully");
@@ -65,6 +66,16 @@ void ApplicationController::shutdown() {
     if (heartbeatController_) {
         heartbeatController_->stop();
         heartbeatController_.reset();
+    }
+
+    if (printerCommandController_) {
+        printerCommandController_->stop();
+        printerCommandController_.reset();
+    }
+
+    if (printerCheckController_) {
+        printerCheckController_->stop();
+        printerCheckController_.reset();
     }
 
     if (printer_) {
@@ -107,15 +118,23 @@ bool ApplicationController::initializeTranslator() {
 
 bool ApplicationController::initializeKafkaControllers() {
     try {
+        // Initialize HeartbeatController
         heartbeatController_ = std::make_unique<connector::controllers::HeartbeatController>(
             kafkaConfig_, driver_
         );
         heartbeatController_->start();
 
+        // Initialize PrinterCommandController
         printerCommandController_ = std::make_unique<connector::controllers::PrinterCommandController>(
             kafkaConfig_, driver_, commandQueue_);
         printerCommandController_->start();
 
+        // Initialize PrinterCheckController with CommandQueue for job state tracking
+        printerCheckController_ = std::make_unique<connector::controllers::PrinterCheckController>(
+            kafkaConfig_, driver_, commandQueue_);
+        printerCheckController_->start();
+
+        // Report status
         if (heartbeatController_->isRunning()) {
             Logger::logInfo("HeartbeatController started successfully");
         } else {
@@ -128,10 +147,18 @@ bool ApplicationController::initializeKafkaControllers() {
             Logger::logWarning("PrinterCommandController not running (Kafka issues?)");
         }
 
+        if (printerCheckController_->isRunning()) {
+            Logger::logInfo("PrinterCheckController started successfully");
+        } else {
+            Logger::logWarning("PrinterCheckController not running (Kafka issues?)");
+        }
+
         return true;
     } catch (const std::exception &e) {
         Logger::logError("Kafka initialization failed: " + std::string(e.what()));
         heartbeatController_.reset();
+        printerCommandController_.reset();
+        printerCheckController_.reset();
         return true; // Continue without Kafka
     }
 }

@@ -30,11 +30,11 @@ namespace core::print {
         bool cancelJob();
 
         // Status
-        PrintJobState getCurrentState() const;
+        JobState getCurrentState() const;
 
         PrintJobProgress getProgress() const;
 
-        std::string stateToString(core::print::PrintJobState state) const;
+        std::string stateToString(JobState state) const;
 
         // Safety
         bool isReadyToPrint() const;
@@ -43,7 +43,7 @@ namespace core::print {
         std::shared_ptr<DriverInterface> driver_;
         std::shared_ptr<CommandExecutorQueue> commandQueue_;
         mutable std::mutex stateMutex_;
-        PrintJobState currentState_;
+        JobState currentState_;
         std::string currentJobId_;
         std::string currentFilePath_;
 
@@ -65,7 +65,7 @@ namespace core::print {
 
         bool checkEndstops() const;
 
-        void updateState(PrintJobState newState);
+        void updateState(JobState newState);
 
         void resetJob();
     };

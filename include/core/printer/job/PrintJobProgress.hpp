@@ -12,7 +12,7 @@
 namespace core::print {
     struct PrintJobProgress {
         std::string jobId;
-        PrintJobState state;
+        JobState state;
         float percentComplete;
         size_t linesExecuted;
         size_t totalLines;

@@ -8,13 +8,13 @@
 #include "core/serial/impl/RealSerialPort.hpp"
 #include "core/printer/impl/RealPrinter.hpp"
 #include "connector/controllers/HeartbeatController.hpp"
+#include "connector/controllers/PrinterCommandController.hpp"
+#include "connector/controllers/PrinterCheckController.hpp"
 #include "connector/kafka/KafkaConfig.hpp"
 #include "translator/GCodeTranslator.hpp"
 #include "core/queue/CommandExecutorQueue.hpp"
 #include "../monitor/SystemMonitor.hpp"
 #include <memory>
-
-#include "connector/controllers/PrinterCommandController.hpp"
 
 class ApplicationController {
 public:
@@ -38,6 +38,7 @@ private:
     connector::kafka::KafkaConfig kafkaConfig_;
     std::unique_ptr<connector::controllers::HeartbeatController> heartbeatController_;
     std::unique_ptr<connector::controllers::PrinterCommandController> printerCommandController_;
+    std::unique_ptr<connector::controllers::PrinterCheckController> printerCheckController_;
 
     // GCode translator (shared for queue and controllers)
     std::shared_ptr<translator::gcode::GCodeTranslator> translator_;

@@ -7,32 +7,32 @@
 namespace core::print {
     PrintJobManager::PrintJobManager(std::shared_ptr<DriverInterface> driver,
                                      std::shared_ptr<CommandExecutorQueue> commandQueue)
-        : driver_(driver), commandQueue_(commandQueue), currentState_(PrintJobState::Idle) {
+        : driver_(driver), commandQueue_(commandQueue), currentState_(JobState::CREATED) {
     }
 
     bool PrintJobManager::startPrintJob(const std::string &gcodePath, const std::string &jobId) {
         std::lock_guard<std::mutex> lock(stateMutex_);
 
-        if (currentState_ != PrintJobState::Idle) {
+        if (currentState_ == JobState::RUNNING) {
             Logger::logError("[PrintJobManager] Cannot start - job already active: " + currentJobId_);
             return false;
         }
 
         // Safety pre-checks
-        updateState(PrintJobState::PreCheck);
+        updateState(JobState::PRECHECK);
         if (!isReadyToPrint()) {
-            updateState(PrintJobState::Error);
+            updateState(JobState::FAILED);
             return false;
         }
 
         // Load file
-        updateState(PrintJobState::Loading);
+        updateState(JobState::LOADING);
 
         // Count lines for progress tracking
         std::ifstream file(gcodePath);
         if (!file.is_open()) {
             Logger::logError("[PrintJobManager] Cannot open G-code file: " + gcodePath);
-            updateState(PrintJobState::Error);
+            updateState(JobState::FAILED);
             return false;
         }
 
@@ -56,10 +56,10 @@ namespace core::print {
         commandQueue_->enqueueFile(gcodePath, 3, jobId); // Priority 3 for print jobs
 
         // Start heating if needed
-        updateState(PrintJobState::Heating);
+        updateState(JobState::HEATING);
         // Temperature commands already sent via G-code
 
-        updateState(PrintJobState::Printing);
+        updateState(JobState::RUNNING);
         Logger::logInfo("[PrintJobManager] Print job started: " + jobId + " (" + std::to_string(lineCount) + " lines)");
 
         return true;
@@ -67,7 +67,7 @@ namespace core::print {
 
     bool PrintJobManager::startPrintJobFromUrl(const std::string &gcodeUrl, const std::string &jobId) {
         std::lock_guard<std::mutex> lock(stateMutex_);
-        if (currentState_ != PrintJobState::Idle) {
+        if (currentState_ == JobState::RUNNING) {
             Logger::logError("[PrintJobManager] Cannot start download - job already active: " + currentJobId_);
             return false;
         }
@@ -75,7 +75,7 @@ namespace core::print {
             downloader_ = std::make_unique<GCodeDownloader>();
         }
         currentJobId_ = jobId;
-        updateState(PrintJobState::Loading);
+        updateState(JobState::LOADING);
 
         downloader_->downloadAsync(
             gcodeUrl, jobId,
@@ -90,14 +90,14 @@ namespace core::print {
 
     bool PrintJobManager::pauseJob() {
         std::lock_guard<std::mutex> lock(stateMutex_);
-        if (currentState_ != PrintJobState::Printing) {
+        if (currentState_ != JobState::RUNNING) {
             Logger::logWarning("[PrintJobManager] Cannot pause - not printing");
             return false;
         }
 
         try {
             driver_->system()->pause();
-            updateState(PrintJobState::Paused);
+            updateState(JobState::PAUSED);
             Logger::logInfo("[PrintJobManager] Job paused: " + currentJobId_);
             return true;
         } catch (const std::exception &e) {
@@ -108,14 +108,14 @@ namespace core::print {
 
     bool PrintJobManager::resumeJob() {
         std::lock_guard<std::mutex> lock(stateMutex_);
-        if (currentState_ != PrintJobState::Paused) {
+        if (currentState_ != JobState::PAUSED) {
             Logger::logWarning("[PrintJobManager] Cannot resume - not paused");
             return false;
         }
 
         try {
             driver_->system()->resume();
-            updateState(PrintJobState::Printing);
+            updateState(JobState::RUNNING);
             Logger::logInfo("[PrintJobManager] Job resumed: " + currentJobId_);
             return true;
         } catch (const std::exception &e) {
@@ -126,7 +126,8 @@ namespace core::print {
 
     bool PrintJobManager::cancelJob() {
         std::lock_guard<std::mutex> lock(stateMutex_);
-        if (currentState_ == PrintJobState::Idle) {
+        if (currentState_ != JobState::RUNNING || currentState_ != JobState::PRECHECK || currentState_ !=
+            JobState::LOADING || currentState_ != JobState::HOMING) {
             Logger::logWarning("[PrintJobManager] No job to cancel");
             return false;
         }
@@ -144,18 +145,18 @@ namespace core::print {
         // Emergency stop
         try {
             driver_->motion()->emergencyStop();
-            updateState(PrintJobState::Cancelled);
+            updateState(JobState::CANCELLED);
             Logger::logInfo("[PrintJobManager] Job cancelled: " + currentJobId_);
             resetJob();
             return true;
         } catch (const std::exception &e) {
             Logger::logError("[PrintJobManager] Cancel failed: " + std::string(e.what()));
-            updateState(PrintJobState::Error);
+            updateState(JobState::FAILED);
             return false;
         }
     }
 
-    PrintJobState PrintJobManager::getCurrentState() const {
+    JobState PrintJobManager::getCurrentState() const {
         std::lock_guard<std::mutex> lock(stateMutex_);
         return currentState_;
     }
@@ -219,14 +220,14 @@ namespace core::print {
         return progress;
     }
 
-    void PrintJobManager::updateState(PrintJobState newState) {
+    void PrintJobManager::updateState(JobState newState) {
         if (currentState_ != newState) {
-            PrintJobState oldState = currentState_;
+            JobState oldState = currentState_;
             currentState_ = newState;
             Logger::logInfo(
                 "[PrintJobManager] State change: " + stateToString(oldState) + " -> " + stateToString(newState));
 
-            if (newState == PrintJobState::Error || newState == PrintJobState::Completed) {
+            if (newState == JobState::FAILED || newState == JobState::COMPLETED) {
                 // Eventuali notifiche Kafka qui
             }
         }
@@ -294,19 +295,16 @@ namespace core::print {
         startTime_ = std::chrono::steady_clock::now();
     }
 
-    std::string PrintJobManager::stateToString(PrintJobState state) const {
+    std::string PrintJobManager::stateToString(JobState state) const {
         switch (state) {
-            case PrintJobState::Idle: return "Idle";
-            case PrintJobState::Loading: return "Loading";
-            case PrintJobState::PreCheck: return "PreCheck";
-            case PrintJobState::Heating: return "Heating";
-            case PrintJobState::Ready: return "Ready";
-            case PrintJobState::Printing: return "Printing";
-            case PrintJobState::Paused: return "Paused";
-            case PrintJobState::Finishing: return "Finishing";
-            case PrintJobState::Completed: return "Completed";
-            case PrintJobState::Error: return "Error";
-            case PrintJobState::Cancelled: return "Cancelled";
+            case JobState::LOADING: return "Loading";
+            case JobState::PRECHECK: return "PreCheck";
+            case JobState::HEATING: return "Heating";
+            case JobState::RUNNING: return "Running";
+            case JobState::PAUSED: return "Paused";
+            case JobState::COMPLETED: return "Finishing";
+            case JobState::FAILED: return "Failed";
+            case JobState::CANCELLED: return "Cancelled";
             default: return "Unknown";
         }
     }
@@ -320,7 +318,7 @@ namespace core::print {
         std::lock_guard<std::mutex> lock(stateMutex_);
         if (!success) {
             Logger::logError("[PrintJobManager] Download failed: " + error);
-            updateState(PrintJobState::Error);
+            updateState(JobState::FAILED);
             resetJob();
             return;
         }

@@ -65,12 +65,10 @@ namespace connector::processors::heartbeat {
         switch (driver_->getState()) {
             case core::PrintState::Idle:
                 return "IDL";
-            case core::PrintState::Running:
+            case core::PrintState::Printing:
                 return "RUN";
             case core::PrintState::Paused:
                 return "PAU";
-            case core::PrintState::Completed:
-                return "CMP";
             case core::PrintState::Error:
                 return "ERR";
             default:

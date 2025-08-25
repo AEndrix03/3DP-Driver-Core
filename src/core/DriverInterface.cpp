@@ -6,20 +6,20 @@
 #include "core/CommandBuilder.hpp"
 
 namespace core {
-
     DriverInterface::DriverInterface(std::shared_ptr<Printer> printer, std::shared_ptr<SerialPort> serialPort)
-            : printer_(std::move(printer)),
-              serialPort_(std::move(serialPort)),
-              commandContext_(std::make_shared<CommandContext>()),
-              commandExecutor_(std::make_shared<CommandExecutor>(serialPort_, commandContext_)),
-              currentState_(PrintState::Idle),
-              motion_(std::make_shared<command::motion::MotionCommands>(this)),
-              endstop_(std::make_shared<command::endstop::EndstopCommands>(this)),
-              extruder_(std::make_shared<command::extruder::ExtruderCommands>(this)),
-              fan_(std::make_shared<command::fan::FanCommands>(this)),
-              system_(std::make_shared<command::system::SystemCommands>(this)),
-              history_(std::make_shared<command::history::HistoryCommands>(this)),
-              temperature_(std::make_shared<command::temperature::TemperatureCommands>(this)) {}
+        : printer_(std::move(printer)),
+          serialPort_(std::move(serialPort)),
+          commandContext_(std::make_shared<CommandContext>()),
+          commandExecutor_(std::make_shared<CommandExecutor>(serialPort_, commandContext_)),
+          currentState_(PrintState::Idle),
+          motion_(std::make_shared<command::motion::MotionCommands>(this)),
+          endstop_(std::make_shared<command::endstop::EndstopCommands>(this)),
+          extruder_(std::make_shared<command::extruder::ExtruderCommands>(this)),
+          fan_(std::make_shared<command::fan::FanCommands>(this)),
+          system_(std::make_shared<command::system::SystemCommands>(this)),
+          history_(std::make_shared<command::history::HistoryCommands>(this)),
+          temperature_(std::make_shared<command::temperature::TemperatureCommands>(this)) {
+    }
 
 
     std::shared_ptr<command::motion::MotionCommands> DriverInterface::motion() const {
@@ -70,12 +70,11 @@ namespace core {
         auto result = commandExecutor_->sendCommandAndAwaitResponse(command, cmdNum);
 
         if (result.isSuccess()) {
-            currentState_ = PrintState::Running;
+            currentState_ = PrintState::Printing;
         } else if (result.isError()) {
             currentState_ = PrintState::Error;
         }
 
         return result;
     }
-
 } // namespace core
