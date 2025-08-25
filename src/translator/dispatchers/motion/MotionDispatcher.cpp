@@ -1,15 +1,12 @@
-//
-// Created by redeg on 01/05/2025.
-//
-
 #include "translator/dispatchers/motion/MotionDispatcher.hpp"
+#include "core/utils/FloatFormatter.hpp"
 #include <iostream>
 #include <cmath>
 
 namespace translator::gcode {
-
     MotionDispatcher::MotionDispatcher(std::shared_ptr<core::DriverInterface> driver)
-            : driver_(std::move(driver)) {}
+        : driver_(std::move(driver)) {
+    }
 
     bool MotionDispatcher::canHandle(const std::string &command) const {
         return command == "G0" || command == "G1" || command == "G220" || command == "G999" ||
@@ -75,12 +72,11 @@ namespace translator::gcode {
             double endAngle = std::atan2(y - cy, x - cx);
             double deltaAngle = normalizeAngle(endAngle - startAngle);
 
-            // Direzione oraria (G2) o antioraria (G3)
             if (command == "G2" && deltaAngle > 0) deltaAngle -= 2 * M_PI;
             if (command == "G3" && deltaAngle < 0) deltaAngle += 2 * M_PI;
 
             constexpr int segments = 40;
-            double dz = 0.0;
+            double dz = 0;
             if (params.count("Z")) {
                 dz = (params.at("Z") - startZ) / segments;
             }
@@ -111,14 +107,14 @@ namespace translator::gcode {
             double z0 = pos.z;
 
             constexpr int segments = 40;
-            double dz = 0.0;
+            double dz = 0;
             if (params.count("Z")) {
                 dz = (params.at("Z") - z0) / segments;
             }
 
             for (int s = 1; s <= segments; ++s) {
                 double t = static_cast<double>(s) / segments;
-                double u = 1.0 - t;
+                double u = 1 - t;
 
                 double px = u * u * u * x0 + 3 * u * u * t * i + 3 * u * t * t * p + t * t * t * x;
                 double py = u * u * u * y0 + 3 * u * u * t * j + 3 * u * t * t * q + t * t * t * y;
@@ -128,8 +124,7 @@ namespace translator::gcode {
                 driver_->motion()->goTo(px, py, pz, f);
             }
         } else if (command == "M114") {
-            driver_->motion()->getPosition(); // Assume log interno dal firmware
+            driver_->motion()->getPosition();
         }
     }
-
 } // namespace translator::gcode

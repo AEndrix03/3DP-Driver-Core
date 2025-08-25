@@ -1,25 +1,22 @@
-//
-// Created by redeg on 26/04/2025.
-//
-
 #include "core/command/temperature/TemperatureCommands.hpp"
 #include "core/DriverInterface.hpp"
+#include "core/utils/FloatFormatter.hpp"
 
 namespace core::command::temperature {
-
     TemperatureCommands::TemperatureCommands(DriverInterface *driver)
-            : CommandCategoryInterface(driver) {}
+        : CommandCategoryInterface(driver) {
+    }
 
     types::Result TemperatureCommands::setHotendTemperature(int temperature) {
         std::vector<std::string> params = {
-                "S" + std::to_string(temperature)
+            "S" + std::to_string(temperature)
         };
         return sendCommand('T', 10, params);
     }
 
     types::Result TemperatureCommands::setBedTemperature(int temperature) {
         std::vector<std::string> params = {
-                "S" + std::to_string(temperature)
+            "S" + std::to_string(temperature)
         };
         return sendCommand('T', 20, params);
     }
@@ -31,5 +28,4 @@ namespace core::command::temperature {
     types::Result TemperatureCommands::getBedTemperature() {
         return sendCommand('T', 21, {});
     }
-
-} // namespace core::printer-command::temperature
+} // namespace core::command::temperature

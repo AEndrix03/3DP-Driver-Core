@@ -1,15 +1,12 @@
-//
-// Created by redeg on 26/04/2025.
-//
-
 #include <regex>
 #include "core/command/motion/MotionCommands.hpp"
 #include "core/DriverInterface.hpp"
+#include "core/utils/FloatFormatter.hpp"
 
 namespace core::command::motion {
-
     MotionCommands::MotionCommands(DriverInterface *driver)
-            : CommandCategoryInterface(driver) {}
+        : CommandCategoryInterface(driver) {
+    }
 
     types::Result MotionCommands::emergencyStop() {
         return sendCommand('M', 0, {});
@@ -17,28 +14,28 @@ namespace core::command::motion {
 
     types::Result MotionCommands::moveTo(float x, float y, float z, float feedrate) {
         std::vector<std::string> params = {
-                "X" + std::to_string(x),
-                "Y" + std::to_string(y),
-                "Z" + std::to_string(z),
-                "F" + std::to_string(feedrate)
+            "X" + utils::formatFloat(x),
+            "Y" + utils::formatFloat(y),
+            "Z" + utils::formatFloat(z),
+            "F" + utils::formatFloat(feedrate)
         };
         return sendCommand('M', 10, params);
     }
 
     types::Result MotionCommands::diagnoseAxis(const std::string &axis, float feedrate) {
         std::vector<std::string> params = {
-                axis,
-                "F" + std::to_string(feedrate)
+            axis,
+            "F" + utils::formatFloat(feedrate)
         };
         return sendCommand('M', 99, params);
     }
 
     types::Result MotionCommands::goTo(float x, float y, float z, float feedrate) {
         std::vector<std::string> params = {
-                "X" + std::to_string(x),
-                "Y" + std::to_string(y),
-                "Z" + std::to_string(z),
-                "F" + std::to_string(feedrate)
+            "X" + utils::formatFloat(x),
+            "Y" + utils::formatFloat(y),
+            "Z" + utils::formatFloat(z),
+            "F" + utils::formatFloat(feedrate)
         };
         return sendCommand('M', 11, params);
     }
@@ -55,7 +52,7 @@ namespace core::command::motion {
 
         for (const auto &line: result.body) {
             if (std::regex_search(line, match, rxX)) {
-                pos.x = std::stod(match[1]);  // ora in mm
+                pos.x = std::stod(match[1]);
             }
             if (std::regex_search(line, match, rxY)) {
                 pos.y = std::stod(match[1]);
@@ -67,6 +64,4 @@ namespace core::command::motion {
 
         return pos;
     }
-
-
-} // namespace core::printer-command::motion
+} // namespace core::command::motion
