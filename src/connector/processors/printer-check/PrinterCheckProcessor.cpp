@@ -1,43 +1,35 @@
-//
-// Created by Andrea on 26/08/2025.
-//
-
 #include "connector/processors/printer-check/PrinterCheckProcessor.hpp"
+
+#include <future>
+
 #include "logger/Logger.hpp"
+#include "application/config/ConfigManager.hpp"
+#include "core/printer/job/tracking/JobTracker.hpp"
+#include "core/printer/state/StateTracker.hpp"
 #include <nlohmann/json.hpp>
 #include <regex>
 #include <sstream>
 
 namespace connector::processors::printer_check {
-    PrinterCheckProcessor::PrinterCheckProcessor(
-        std::shared_ptr<events::printer_check::PrinterCheckSender> sender,
-        std::shared_ptr<core::DriverInterface> driver,
-        std::shared_ptr<core::CommandExecutorQueue> commandQueue,
-        const std::string &driverId)
-        : sender_(sender), driver_(driver), commandQueue_(commandQueue), driverId_(driverId) {
-    }
-
     void PrinterCheckProcessor::processPrinterCheckRequest(
         const connector::models::printer_check::PrinterCheckRequest &request) {
         Logger::logInfo("[PrinterCheckProcessor] Processing check request for job: " + request.jobId);
+
         try {
-            // Create response with basic identifiers
             connector::models::printer_check::PrinterCheckResponse response;
             response.jobId = request.jobId;
             response.driverId = driverId_;
             response.jobStatusCode = getJobStatusCode(request.jobId);
             response.printerStatusCode = getPrinterStatusCode();
 
-            // Collect all printer state data
             collectPositionData(response);
             collectTemperatureData(response);
             collectFanData(response);
             collectJobStatusData(response, request.jobId);
             collectDiagnosticData(response);
 
-            // Send the response
             sendResponse(response);
-            Logger::logInfo("[PrinterCheckProcessor] Check response sent successfully for job: " + request.jobId);
+            Logger::logInfo("[PrinterCheckProcessor] Check response sent for job: " + request.jobId);
         } catch (const std::exception &e) {
             Logger::logError("[PrinterCheckProcessor] Processing error: " + std::string(e.what()));
             sendErrorResponse(request.jobId, e.what());
@@ -52,13 +44,26 @@ namespace connector::processors::printer_check {
                 response.xPosition = std::to_string(position->x);
                 response.yPosition = std::to_string(position->y);
                 response.zPosition = std::to_string(position->z);
-                // E position would need additional tracking
-                response.ePosition = "0.0"; // Placeholder
+
+                // Get real E position from StateTracker
+                auto &stateTracker = core::state::StateTracker::getInstance();
+                response.ePosition = std::to_string(stateTracker.getCurrentEPosition());
             } else {
-                response.xPosition = "UNKNOWN";
-                response.yPosition = "UNKNOWN";
-                response.zPosition = "UNKNOWN";
-                response.ePosition = "UNKNOWN";
+                // Retry with error recovery
+                Logger::logWarning("[PrinterCheckProcessor] Position query failed, retrying...");
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                position = driver_->motion()->getPosition();
+
+                if (position.has_value()) {
+                    response.xPosition = std::to_string(position->x);
+                    response.yPosition = std::to_string(position->y);
+                    response.zPosition = std::to_string(position->z);
+                } else {
+                    response.xPosition = "QUERY_FAILED";
+                    response.yPosition = "QUERY_FAILED";
+                    response.zPosition = "QUERY_FAILED";
+                }
+                response.ePosition = "QUERY_FAILED";
             }
         } catch (const std::exception &e) {
             Logger::logError("[PrinterCheckProcessor] Position data collection failed: " + std::string(e.what()));
@@ -72,22 +77,39 @@ namespace connector::processors::printer_check {
     void PrinterCheckProcessor::collectTemperatureData(
         connector::models::printer_check::PrinterCheckResponse &response) {
         try {
-            // Get hotend temperature
-            auto hotendResult = driver_->temperature()->getHotendTemperature();
-            if (hotendResult.isSuccess()) {
-                response.extruderTemp = parseTemperatureFromResponse(hotendResult.message);
-                response.extruderStatus = "READY";
+            // Real temperature queries with timeout
+            auto hotendFuture = std::async(std::launch::async, [this]() {
+                return driver_->temperature()->getHotendTemperature();
+            });
+
+            auto bedFuture = std::async(std::launch::async, [this]() {
+                return driver_->temperature()->getBedTemperature();
+            });
+
+            // Wait with timeout
+            if (hotendFuture.wait_for(std::chrono::milliseconds(2000)) == std::future_status::ready) {
+                auto hotendResult = hotendFuture.get();
+                if (hotendResult.isSuccess()) {
+                    response.extruderTemp = parseTemperatureFromResponse(hotendResult.message);
+                    response.extruderStatus = "READY";
+                } else {
+                    response.extruderTemp = "COMM_ERROR";
+                    response.extruderStatus = "COMM_ERROR";
+                }
             } else {
-                response.extruderTemp = "UNKNOWN";
-                response.extruderStatus = "ERROR";
+                response.extruderTemp = "TIMEOUT";
+                response.extruderStatus = "TIMEOUT";
             }
 
-            // Get bed temperature
-            auto bedResult = driver_->temperature()->getBedTemperature();
-            if (bedResult.isSuccess()) {
-                response.bedTemp = parseTemperatureFromResponse(bedResult.message);
+            if (bedFuture.wait_for(std::chrono::milliseconds(2000)) == std::future_status::ready) {
+                auto bedResult = bedFuture.get();
+                if (bedResult.isSuccess()) {
+                    response.bedTemp = parseTemperatureFromResponse(bedResult.message);
+                } else {
+                    response.bedTemp = "COMM_ERROR";
+                }
             } else {
-                response.bedTemp = "UNKNOWN";
+                response.bedTemp = "TIMEOUT";
             }
         } catch (const std::exception &e) {
             Logger::logError("[PrinterCheckProcessor] Temperature data collection failed: " + std::string(e.what()));
@@ -100,38 +122,79 @@ namespace connector::processors::printer_check {
     void PrinterCheckProcessor::collectFanData(
         connector::models::printer_check::PrinterCheckResponse &response) {
         try {
-            // Fan status would need to be tracked or queried
-            // For now, provide basic status
-            response.fanStatus = "READY";
-            response.fanSpeed = "0"; // Would need actual fan speed tracking
+            // Query real fan status
+            auto &stateTracker = core::state::StateTracker::getInstance();
+            int currentFanSpeed = stateTracker.getCurrentFanSpeed();
+
+            response.fanSpeed = std::to_string(currentFanSpeed);
+            response.fanStatus = currentFanSpeed > 0 ? "RUNNING" : "STOPPED";
+
+            // Validate with actual query if available
+            auto statusResult = driver_->system()->printStatus();
+            if (statusResult.isSuccess()) {
+                for (const auto &line: statusResult.body) {
+                    if (line.find("FAN") != std::string::npos) {
+                        std::string fanFromStatus = parseFanFromResponse(line);
+                        if (fanFromStatus != "UNKNOWN") {
+                            response.fanSpeed = fanFromStatus;
+                        }
+                        break;
+                    }
+                }
+            }
         } catch (const std::exception &e) {
             Logger::logError("[PrinterCheckProcessor] Fan data collection failed: " + std::string(e.what()));
             response.fanStatus = "ERROR";
-            response.fanSpeed = "UNKNOWN";
+            response.fanSpeed = "ERROR";
         }
     }
 
     void PrinterCheckProcessor::collectJobStatusData(
         connector::models::printer_check::PrinterCheckResponse &response, const std::string &jobId) {
+        auto &config = core::config::ConfigManager::getInstance();
+        auto &tracker = core::jobs::JobTracker::getInstance();
+        auto &stateTracker = core::state::StateTracker::getInstance();
+
         try {
-            // Get command queue statistics for job tracking
-            if (commandQueue_) {
-                auto stats = commandQueue_->getStatistics();
-                response.commandOffset = std::to_string(stats.totalExecuted);
-                response.averageSpeed = stats.totalExecuted > 0 ? std::to_string(stats.totalExecuted / 60) : "0";
-                // Very basic calculation
-                // Queue size gives us an indication of job progress
-                if (stats.currentQueueSize > 0) {
-                    Logger::logInfo(
-                        "[PrinterCheckProcessor] Queue has " + std::to_string(stats.currentQueueSize) +
-                        " commands pending");
+            // Get real job info from tracker
+            auto jobInfo = tracker.getJobInfo(jobId);
+            if (jobInfo.has_value()) {
+                response.commandOffset = std::to_string(jobInfo->executedCommands);
+
+                // Real average speed calculation
+                auto elapsedSeconds = jobInfo->getElapsedTime().count();
+                if (elapsedSeconds > 0) {
+                    response.averageSpeed = std::to_string(jobInfo->executedCommands / elapsedSeconds * 60);
+                    // commands/minute
+                } else {
+                    response.averageSpeed = "0";
+                }
+
+                response.lastCommand = jobInfo->currentCommand;
+            } else {
+                // Fallback to queue stats
+                if (commandQueue_) {
+                    auto stats = commandQueue_->getStatistics();
+                    response.commandOffset = std::to_string(stats.totalExecuted);
+                    response.averageSpeed = "0"; // No job context available
+                    response.lastCommand = "UNKNOWN_JOB";
                 }
             }
-            // Default values that would need proper job tracking implementation
-            response.feed = "1000"; // Default feedrate
-            response.layer = "0"; // Would need layer tracking
-            response.layerHeight = "0.2"; // Default layer height
-            response.lastCommand = ""; // Would need last command tracking
+
+            // Real feed rate from state tracker
+            response.feed = std::to_string(stateTracker.getCurrentFeedRate());
+
+            // Real layer tracking
+            response.layer = std::to_string(stateTracker.getCurrentLayer());
+            response.layerHeight = std::to_string(stateTracker.getCurrentLayerHeight());
+
+            // Fallback to config defaults only if state is unavailable
+            if (response.feed == "0") {
+                response.feed = config.getPrinterCheckConfig().defaultFeed;
+            }
+            if (response.layerHeight == "0" || response.layerHeight == "0.000000") {
+                response.layerHeight = config.getPrinterCheckConfig().defaultLayerHeight;
+            }
         } catch (const std::exception &e) {
             Logger::logError("[PrinterCheckProcessor] Job status data collection failed: " + std::string(e.what()));
             response.feed = "ERROR";
@@ -145,7 +208,6 @@ namespace connector::processors::printer_check {
     void PrinterCheckProcessor::collectDiagnosticData(
         connector::models::printer_check::PrinterCheckResponse &response) {
         try {
-            // Check for any exceptions or errors
             std::ostringstream exceptions;
             std::ostringstream logs;
 
@@ -155,145 +217,71 @@ namespace connector::processors::printer_check {
                 exceptions << "PRINTER_ERROR;";
             }
 
-            // Check endstops
-            auto endstopResult = driver_->endstop()->readEndstopStatus();
-            if (!endstopResult.isSuccess()) {
-                exceptions << "ENDSTOP_ERROR;";
-            } else {
-                for (const auto &line: endstopResult.body) {
-                    if (line.find("TRIGGERED") != std::string::npos) {
-                        exceptions << "ENDSTOP_TRIGGERED;";
+            // Real endstop check with timeout
+            try {
+                auto endstopFuture = std::async(std::launch::async, [this]() {
+                    return driver_->endstop()->readEndstopStatus();
+                });
+
+                if (endstopFuture.wait_for(std::chrono::milliseconds(1000)) == std::future_status::ready) {
+                    auto endstopResult = endstopFuture.get();
+                    if (!endstopResult.isSuccess()) {
+                        exceptions << "ENDSTOP_COMM_ERROR;";
+                    } else {
+                        for (const auto &line: endstopResult.body) {
+                            if (line.find("TRIGGERED") != std::string::npos) {
+                                exceptions << "ENDSTOP_TRIGGERED;";
+                            }
+                            logs << "ENDSTOP:" << line << ";";
+                        }
                     }
-                    logs << line << ";";
+                } else {
+                    exceptions << "ENDSTOP_TIMEOUT;";
                 }
+            } catch (const std::exception &e) {
+                exceptions << "ENDSTOP_EXCEPTION:" << e.what() << ";";
             }
 
-            // Get system status
-            auto statusResult = driver_->system()->printStatus();
-            if (statusResult.isSuccess()) {
-                for (const auto &line: statusResult.body) {
-                    logs << line << ";";
+            // System status with real data
+            try {
+                auto statusFuture = std::async(std::launch::async, [this]() {
+                    return driver_->system()->printStatus();
+                });
+
+                if (statusFuture.wait_for(std::chrono::milliseconds(1000)) == std::future_status::ready) {
+                    auto statusResult = statusFuture.get();
+                    if (statusResult.isSuccess()) {
+                        for (const auto &line: statusResult.body) {
+                            logs << "SYS:" << line << ";";
+                        }
+                    } else {
+                        logs << "SYS:COMM_ERROR;";
+                    }
+                } else {
+                    logs << "SYS:TIMEOUT;";
                 }
+            } catch (const std::exception &e) {
+                logs << "SYS:EXCEPTION:" << e.what() << ";";
+            }
+
+            // Add queue health info
+            if (commandQueue_) {
+                auto stats = commandQueue_->getStatistics();
+                logs << "QUEUE:size=" << stats.currentQueueSize
+                        << ",errors=" << stats.totalErrors << ";";
             }
 
             response.exceptions = exceptions.str();
             response.logs = logs.str();
         } catch (const std::exception &e) {
             Logger::logError("[PrinterCheckProcessor] Diagnostic data collection failed: " + std::string(e.what()));
-            response.exceptions = "DIAGNOSTIC_ERROR";
+            response.exceptions = "DIAGNOSTIC_ERROR:" + std::string(e.what());
             response.logs = "DIAGNOSTIC_COLLECTION_FAILED";
         }
     }
 
     std::string PrinterCheckProcessor::getJobStatusCode(const std::string &jobId) const {
-        // TODO: This should integrate with PrintJobManager when available
-        // For now, we use basic logic based on printer state and queue status
-        if (!commandQueue_) {
-            return "UNK";
-        }
-        auto stats = commandQueue_->getStatistics();
-        auto printerState = driver_->getState();
-        // Basic job state inference based on printer state and queue
-        if (printerState == core::PrintState::Error) {
-            return "FAI"; // Failed
-        } else if (printerState == core::PrintState::Paused) {
-            return "PAU"; // Paused
-        } else if (printerState == core::PrintState::Printing && stats.currentQueueSize > 0) {
-            return "RUN"; // Running
-        } else if (printerState == core::PrintState::Printing && stats.currentQueueSize == 0) {
-            return "CMP"; // Completed (was printing, now no more commands)
-        } else {
-            // No active job or job status unknown
-            return "UNK";
-        }
-    }
-
-    std::string PrinterCheckProcessor::getPrinterStatusCode() const {
-        if (!driver_) {
-            return "UNK";
-        }
-
-        switch (driver_->getState()) {
-            case core::PrintState::Idle:
-                return "IDL";
-            case core::PrintState::Homing:
-                return "HOM";
-            case core::PrintState::Printing:
-                return "PRI";
-            case core::PrintState::Paused:
-                return "PAU";
-            case core::PrintState::Error:
-                return "ERR";
-            default:
-                return "UNK";
-        }
-    }
-
-    std::string PrinterCheckProcessor::parseTemperatureFromResponse(const std::string &response) const {
-        // Parse temperature from response using regex
-        std::regex tempRegex(R"(T:(\d+(?:\.\d+)?))");
-        std::smatch match;
-        if (std::regex_search(response, match, tempRegex)) {
-            return match[1].str();
-        }
-        // Fallback - look for any number
-        std::regex numberRegex(R"((\d+(?:\.\d+)?))");
-        if (std::regex_search(response, match, numberRegex)) {
-            return match[1].str();
-        }
-        return "UNKNOWN";
-    }
-
-    std::string PrinterCheckProcessor::parseFanFromResponse(const std::string &response) const {
-        // Parse fan speed from response using regex
-        std::regex fanRegex(R"(S:(\d+))");
-        std::smatch match;
-        if (std::regex_search(response, match, fanRegex)) {
-            return match[1].str();
-        }
-        return "UNKNOWN";
-    }
-
-    void PrinterCheckProcessor::sendResponse(
-        const connector::models::printer_check::PrinterCheckResponse &response) {
-        try {
-            if (!response.isValid()) {
-                Logger::logError("[PrinterCheckProcessor] Invalid response created");
-                return;
-            }
-
-            nlohmann::json responseJson = response.toJson();
-            std::string responseMessage = responseJson.dump();
-
-            if (sender_->sendMessage(responseMessage, driverId_)) {
-                Logger::logInfo("[PrinterCheckProcessor] Check response sent successfully");
-            } else {
-                Logger::logError("[PrinterCheckProcessor] Failed to send check response");
-            }
-        } catch (const std::exception &e) {
-            Logger::logError("[PrinterCheckProcessor] Failed to send response: " + std::string(e.what()));
-        }
-    }
-
-    void PrinterCheckProcessor::sendErrorResponse(const std::string &jobId, const std::string &error) {
-        connector::models::printer_check::PrinterCheckResponse errorResponse;
-        errorResponse.jobId = jobId;
-        errorResponse.driverId = driverId_;
-        errorResponse.jobStatusCode = "FAI"; // Failed
-        errorResponse.printerStatusCode = getPrinterStatusCode();
-        errorResponse.exceptions = error;
-        errorResponse.logs = "Error during printer check processing";
-
-        // Set other fields to error state
-        errorResponse.xPosition = "ERROR";
-        errorResponse.yPosition = "ERROR";
-        errorResponse.zPosition = "ERROR";
-        errorResponse.ePosition = "ERROR";
-        errorResponse.extruderTemp = "ERROR";
-        errorResponse.bedTemp = "ERROR";
-        errorResponse.fanStatus = "ERROR";
-        errorResponse.fanSpeed = "ERROR";
-
-        sendResponse(errorResponse);
+        auto &tracker = core::jobs::JobTracker::getInstance();
+        return tracker.getJobStateCode(jobId);
     }
 } // namespace connector::processors::printer_check

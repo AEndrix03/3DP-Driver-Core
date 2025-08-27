@@ -19,10 +19,9 @@
 #include <vector>
 
 namespace core {
-
-/**
- * @brief Interfaccia principale del driver, esposta verso applicazioni esterne.
- */
+    /**
+     * @brief Interfaccia principale del driver, esposta verso applicazioni esterne.
+     */
     class DriverInterface {
     public:
         explicit DriverInterface(std::shared_ptr<Printer> printer, std::shared_ptr<SerialPort> serialPort);
@@ -41,11 +40,11 @@ namespace core {
 
         std::shared_ptr<command::temperature::TemperatureCommands> temperature() const;
 
-        types::Result sendCustomCommand(const std::string &rawCommand);
+        types::Result sendCustomCommand(const std::string &rawCommand) const;
 
         PrintState getState() const;
 
-        types::Result sendCommandInternal(char category, int code, const std::vector<std::string> &params);
+        types::Result sendCommandInternal(char category, int code, const std::vector<std::string> &params) const;
 
     private:
         std::shared_ptr<Printer> printer_;
@@ -62,5 +61,4 @@ namespace core {
         std::shared_ptr<command::history::HistoryCommands> history_;
         std::shared_ptr<command::temperature::TemperatureCommands> temperature_;
     };
-
 } // namespace core

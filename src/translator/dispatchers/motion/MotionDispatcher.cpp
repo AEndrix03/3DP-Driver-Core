@@ -3,6 +3,9 @@
 #include <iostream>
 #include <cmath>
 
+#include "core/printer/job/tracking/JobTracker.hpp"
+#include "core/printer/state/StateTracker.hpp"
+
 namespace translator::gcode {
     MotionDispatcher::MotionDispatcher(std::shared_ptr<core::DriverInterface> driver)
         : driver_(std::move(driver)) {
@@ -38,11 +41,46 @@ namespace translator::gcode {
     }
 
     void MotionDispatcher::handle(const std::string &command, const std::map<std::string, double> &params) {
+        auto &stateTracker = core::state::StateTracker::getInstance();
+        auto &jobTracker = core::jobs::JobTracker::getInstance();
+        // Track feedrate changes
+        if (params.count("F")) {
+            stateTracker.updateFeedRate(params.at("F"));
+        }
+        // Track E position changes
+        if (params.count("E")) {
+            double eValue = params.at("E");
+            stateTracker.updateEPosition(eValue);
+        }
+        // Track command for diagnostics
+        std::ostringstream cmdStr;
+        cmdStr << command;
+        for (const auto &[key, value]: params) {
+            cmdStr << " " << key << value;
+        }
+        stateTracker.updateLastCommand(cmdStr.str());
+        stateTracker.incrementCommandCount();
+        if (params.count("Z")) {
+            static double lastZ = 0.0;
+            double currentZ = params.at("Z");
+            if (currentZ > lastZ + 0.1) {
+                // Layer change threshold
+                stateTracker.incrementLayer();
+                stateTracker.setLayerHeight(currentZ - lastZ);
+            }
+            lastZ = currentZ;
+        }
+
+        std::string currentJobId = jobTracker.getCurrentJobId();
+        if (!currentJobId.empty()) {
+            jobTracker.updateJobProgress(currentJobId, cmdStr.str());
+        }
+
         if (command == "G0" || command == "G1") {
             double x = params.count("X") ? params.at("X") : -1;
             double y = params.count("Y") ? params.at("Y") : -1;
             double z = params.count("Z") ? params.at("Z") : -1;
-            double f = params.count("F") ? params.at("F") : 1000;
+            double f = params.count("F") ? params.at("F") : stateTracker.getCurrentFeedRate();
             driver_->motion()->moveTo(x, y, z, f);
         } else if (command == "G220") {
             if (params.count("X")) driver_->motion()->diagnoseAxis("X", params.at("X"));

@@ -11,6 +11,9 @@
 #include <filesystem>
 #include <algorithm>
 
+#include "core/printer/job/tracking/JobTracker.hpp"
+#include "core/printer/state/StateTracker.hpp"
+
 namespace core {
     CommandExecutorQueue::CommandExecutorQueue(std::shared_ptr<translator::gcode::GCodeTranslator> translator)
         : translator_(std::move(translator)) {
@@ -112,18 +115,26 @@ namespace core {
         std::vector<std::string> commands;
         std::string line;
 
+        // Single pass: count and collect commands
         while (std::getline(file, line)) {
             if (line.empty() || line.find_first_not_of(" \t\r\n") == std::string::npos) continue;
             if (line[0] == ';' || line[0] == '%') continue;
             commands.push_back(line);
         }
-
         file.close();
 
         if (commands.empty()) {
             Logger::logWarning("[CommandExecutorQueue] No valid commands found in file: " + filePath);
             return;
         }
+
+        // Initialize job tracking with real command count
+        auto &jobTracker = core::jobs::JobTracker::getInstance();
+        jobTracker.startJob(jobId, commands.size());
+
+        // Reset state tracker for new job
+        auto &stateTracker = core::state::StateTracker::getInstance();
+        stateTracker.resetForNewJob();
 
         enqueueCommands(commands, priority, jobId);
         Logger::logInfo("[CommandExecutorQueue] Loaded " + std::to_string(commands.size()) +
@@ -214,6 +225,9 @@ namespace core {
     }
 
     void CommandExecutorQueue::executeCommand(const PriorityCommand &cmd) {
+        auto &tracker = jobs::JobTracker::getInstance();
+        tracker.updateJobProgress(cmd.jobId, cmd.command);
+
         Logger::logInfo("[CommandExecutorQueue] Executing (priority=" + std::to_string(cmd.priority) +
                         ", jobId=" + cmd.jobId + "): " + cmd.command);
 

@@ -4,6 +4,7 @@
 
 #include "core/DriverInterface.hpp"
 #include "core/CommandBuilder.hpp"
+#include "core/printer/ErrorRecovery.hpp"
 
 namespace core {
     DriverInterface::DriverInterface(std::shared_ptr<Printer> printer, std::shared_ptr<SerialPort> serialPort)
@@ -50,7 +51,7 @@ namespace core {
         return temperature_;
     }
 
-    types::Result DriverInterface::sendCustomCommand(const std::string &rawCommand) {
+    types::Result DriverInterface::sendCustomCommand(const std::string &rawCommand) const {
         if (!printer_->sendCommand(rawCommand)) {
             return {types::ResultCode::Error, "Failed to send custom printer-command."};
         }
@@ -62,19 +63,16 @@ namespace core {
     }
 
     types::Result
-    DriverInterface::sendCommandInternal(char category, int code, const std::vector<std::string> &params) {
-        uint16_t cmdNum = commandContext_->nextCommandNumber();
-        std::string command = CommandBuilder::buildCommand(cmdNum, category, code, params);
-        commandContext_->storeCommand(cmdNum, command);
+    DriverInterface::sendCommandInternal(char category, int code, const std::vector<std::string> &params) const {
+        static recovery::ResilientExecutor<void> executor(
+            recovery::createPrinterRetryConfig<void>(),
+            recovery::createPrinterCircuitConfig()
+        );
 
-        auto result = commandExecutor_->sendCommandAndAwaitResponse(command, cmdNum);
-
-        if (result.isSuccess()) {
-            currentState_ = PrintState::Printing;
-        } else if (result.isError()) {
-            currentState_ = PrintState::Error;
-        }
-
-        return result;
+        return executor.execute([&]() {
+            uint16_t cmdNum = commandContext_->nextCommandNumber();
+            std::string command = CommandBuilder::buildCommand(cmdNum, category, code, params);
+            return commandExecutor_->sendCommandAndAwaitResponse(command, cmdNum);
+        });
     }
 } // namespace core
