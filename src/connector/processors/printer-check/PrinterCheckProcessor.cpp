@@ -53,10 +53,13 @@ namespace connector::processors::printer_check {
             // Wait for all with timeout
             bool allComplete = true;
             for (auto &future: futures) {
-                if (future.wait_for(std::chrono::milliseconds(config.timeoutMs)) != std::future_status::ready) {
+                try {
+                    if (future.wait_for(std::chrono::milliseconds(config.timeoutMs)) == std::future_status::ready) {
+                        future.get(); // Cattura eccezioni dal thread
+                    }
+                } catch (const std::exception &e) {
+                    Logger::logError("[PrinterCheckProcessor] Async task failed: " + std::string(e.what()));
                     allComplete = false;
-                    Logger::logWarning("[PrinterCheckProcessor] Data collection timeout");
-                    break;
                 }
             }
 

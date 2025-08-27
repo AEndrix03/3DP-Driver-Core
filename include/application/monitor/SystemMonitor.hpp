@@ -12,11 +12,14 @@
 #include <thread>
 #include <atomic>
 
+#include "connector/controllers/PrinterControlController.hpp"
+
 class SystemMonitor {
 public:
     SystemMonitor(std::unique_ptr<connector::controllers::HeartbeatController> &heartbeatController,
                   std::unique_ptr<connector::controllers::PrinterCommandController> &printerCommandController,
                   std::unique_ptr<connector::controllers::PrinterCheckController> &printerCheckController,
+                  std::unique_ptr<connector::controllers::PrinterControlController> &printerControlController,
                   std::shared_ptr<core::RealPrinter> printer);
 
     ~SystemMonitor();
@@ -34,11 +37,10 @@ private:
     std::unique_ptr<connector::controllers::HeartbeatController> &heartbeatController_;
     std::unique_ptr<connector::controllers::PrinterCommandController> &printerCommandController_;
     std::unique_ptr<connector::controllers::PrinterCheckController> &printerCheckController_;
+    std::unique_ptr<connector::controllers::PrinterControlController> &printerControlController_;
     std::shared_ptr<core::RealPrinter> printer_;
 
     void monitorLoop();
 
-    void checkHardwareStatus();
-
-    void reportKafkaStats();
+    void reportKafkaStats() const;
 };

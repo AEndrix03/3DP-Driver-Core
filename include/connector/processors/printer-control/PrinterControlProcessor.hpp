@@ -4,43 +4,39 @@
 #include "../../models/printer-control/PrinterStartRequest.hpp"
 #include "../../models/printer-control/PrinterStopRequest.hpp"
 #include "../../models/printer-control/PrinterPauseRequest.hpp"
+#include "core/DriverInterface.hpp"
+#include "core/queue/CommandExecutorQueue.hpp"
+#include "core/printer/job/PrintJobManager.hpp"
+#include <memory>
 
 namespace connector::processors::printer_control {
-
     class PrinterControlProcessor : public BaseProcessor {
     public:
-        void processPrinterStartRequest(const connector::models::printer_control::PrinterStartRequest &request) {
-            // TODO: Process start print request
-            // TODO: Validate current printer state can start
-            // TODO: Call SystemCommands::startPrint()
-            // TODO: Send appropriate response/event
-            (void) request;
-        }
+        PrinterControlProcessor(std::shared_ptr<core::DriverInterface> driver,
+                                std::shared_ptr<core::CommandExecutorQueue> commandQueue,
+                                std::shared_ptr<core::print::PrintJobManager> jobManager);
 
-        void processPrinterStopRequest(const connector::models::printer_control::PrinterStopRequest &request) {
-            // TODO: Process stop print request
-            // TODO: Call emergency stop or graceful stop based on context
-            // TODO: Update print state
-            // TODO: Send appropriate response/event
-            (void) request;
-        }
+        void processPrinterStartRequest(const models::printer_control::PrinterStartRequest &request);
 
-        void processPrinterPauseRequest(const connector::models::printer_control::PrinterPauseRequest &request) {
-            // TODO: Process pause print request
-            // TODO: Call SystemCommands::pause()
-            // TODO: Update print state
-            // TODO: Send appropriate response/event
-            (void) request;
-        }
+        void processPrinterStopRequest(const models::printer_control::PrinterStopRequest &request) const;
+
+        void processPrinterPauseRequest(const models::printer_control::PrinterPauseRequest &request) const;
 
         std::string getProcessorName() const override {
             return "PrinterControlProcessor";
         }
 
         bool isReady() const override {
-            // TODO: Check if SystemCommands and printer are ready
-            return false;
+            return driver_ && commandQueue_ && jobManager_;
         }
-    };
 
+    private:
+        std::shared_ptr<core::DriverInterface> driver_;
+        std::shared_ptr<core::CommandExecutorQueue> commandQueue_;
+        std::shared_ptr<core::print::PrintJobManager> jobManager_;
+
+        void executeGCodeSequence(const std::string &gcode, const std::string &jobId) const;
+
+        static std::string generateJobId(const std::string &driverId);
+    };
 }

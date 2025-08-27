@@ -33,8 +33,13 @@ bool ApplicationController::initialize() {
     if (!initializeKafkaControllers()) return false;
 
     // Start system monitor
-    monitor_ = std::make_unique<SystemMonitor>(heartbeatController_, printerCommandController_, printerCheckController_,
-                                               printer_);
+    monitor_ = std::make_unique<SystemMonitor>(
+        heartbeatController_,
+        printerCommandController_,
+        printerCheckController_,
+        printerControlController_,
+        printer_
+    );
     monitor_->start();
 
     Logger::logInfo("Application initialized successfully");
@@ -78,6 +83,11 @@ void ApplicationController::shutdown() {
         printerCheckController_.reset();
     }
 
+    if (printerControlController_) {
+        printerControlController_->stop();
+        printerControlController_.reset();
+    }
+
     if (printer_) {
         printer_->shutdown();
     }
@@ -118,7 +128,7 @@ bool ApplicationController::initializeTranslator() {
 
 bool ApplicationController::initializeKafkaControllers() {
     try {
-        // Initialize HeartbeatController
+        // Initialize HeartbeatController (existing)
         heartbeatController_ = std::make_unique<connector::controllers::HeartbeatController>(
             kafkaConfig_, driver_
         );
@@ -129,28 +139,33 @@ bool ApplicationController::initializeKafkaControllers() {
             kafkaConfig_, driver_, commandQueue_);
         printerCommandController_->start();
 
-        // Initialize PrinterCheckController with CommandQueue for job state tracking
+        // Initialize PrinterCheckController
         printerCheckController_ = std::make_unique<connector::controllers::PrinterCheckController>(
             kafkaConfig_, driver_, commandQueue_);
         printerCheckController_->start();
 
+        // Initialize PrintJobManager
+        jobManager_ = std::make_shared<core::print::PrintJobManager>(driver_, commandQueue_);
+
+        // Initialize PrinterControlController
+        printerControlController_ = std::make_unique<connector::controllers::PrinterControlController>(
+            kafkaConfig_, driver_, commandQueue_, jobManager_);
+        printerControlController_->start();
+
         // Report status
         if (heartbeatController_->isRunning()) {
             Logger::logInfo("HeartbeatController started successfully");
-        } else {
-            Logger::logWarning("HeartbeatController not running (Kafka issues?)");
         }
-
         if (printerCommandController_->isRunning()) {
             Logger::logInfo("PrinterCommandController started successfully");
-        } else {
-            Logger::logWarning("PrinterCommandController not running (Kafka issues?)");
         }
-
         if (printerCheckController_->isRunning()) {
             Logger::logInfo("PrinterCheckController started successfully");
+        }
+        if (printerControlController_->isRunning()) {
+            Logger::logInfo("PrinterControlController started successfully");
         } else {
-            Logger::logWarning("PrinterCheckController not running (Kafka issues?)");
+            Logger::logWarning("PrinterControlController not running (Kafka issues?)");
         }
 
         return true;
@@ -159,7 +174,7 @@ bool ApplicationController::initializeKafkaControllers() {
         heartbeatController_.reset();
         printerCommandController_.reset();
         printerCheckController_.reset();
-        return true; // Continue without Kafka
+        return false;
     }
 }
 

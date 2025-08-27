@@ -1,16 +1,20 @@
 #include "application/monitor/SystemMonitor.hpp"
 #include "logger/Logger.hpp"
 #include <chrono>
+#include <utility>
 
 SystemMonitor::SystemMonitor(std::unique_ptr<connector::controllers::HeartbeatController> &heartbeatController,
                              std::unique_ptr<connector::controllers::PrinterCommandController> &
                              printerCommandController,
                              std::unique_ptr<connector::controllers::PrinterCheckController> &printerCheckController,
+                             std::unique_ptr<connector::controllers::PrinterControlController> &
+                             printerControlController,
                              std::shared_ptr<core::RealPrinter> printer)
     : heartbeatController_(heartbeatController),
       printerCommandController_(printerCommandController),
       printerCheckController_(printerCheckController),
-      printer_(printer) {
+      printerControlController_(printerControlController),
+      printer_(std::move(printer)) {
 }
 
 SystemMonitor::~SystemMonitor() {
@@ -69,11 +73,7 @@ void SystemMonitor::monitorLoop() {
     }
 }
 
-void SystemMonitor::checkHardwareStatus() {
-    // Removed - not needed and causes blocking
-}
-
-void SystemMonitor::reportKafkaStats() {
+void SystemMonitor::reportKafkaStats() const {
     Logger::logInfo("[SystemMonitor] ===== Kafka Controllers Status =====");
 
     // Heartbeat Controller
@@ -116,6 +116,21 @@ void SystemMonitor::reportKafkaStats() {
         Logger::logInfo("  Errors: " + std::to_string(stats.processingErrors));
     } else {
         Logger::logInfo("[SystemMonitor] PrinterCheck Controller: NOT AVAILABLE");
+    }
+
+    // Printer Control Controller
+    if (printerControlController_) {
+        auto stats = printerControlController_->getStatistics();
+        bool isRunning = printerControlController_->isRunning();
+
+        Logger::logInfo("[SystemMonitor] PrinterControl Status:");
+        Logger::logInfo("  Running: " + std::string(isRunning ? "true" : "false"));
+        Logger::logInfo("  Start Requests: " + std::to_string(stats.startRequests));
+        Logger::logInfo("  Stop Requests: " + std::to_string(stats.stopRequests));
+        Logger::logInfo("  Pause Requests: " + std::to_string(stats.pauseRequests));
+        Logger::logInfo("  Errors: " + std::to_string(stats.processingErrors));
+    } else {
+        Logger::logInfo("[SystemMonitor] PrinterControl Controller: NOT AVAILABLE");
     }
 
     Logger::logInfo("[SystemMonitor] =======================================");
