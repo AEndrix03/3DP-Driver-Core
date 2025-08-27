@@ -3,145 +3,123 @@
 //
 
 #pragma once
-
 #include <atomic>
 #include <mutex>
 #include <chrono>
 #include <string>
 
 namespace core::state {
-    class StateTracker {
-    public:
-        static StateTracker &getInstance();
+       class StateTracker {
+       public:
+              static StateTracker &getInstance();
 
-        // Position tracking
-        void updateEPosition(double e) {
-            ePosition_ = e;
-            lastUpdate_ = now();
-        }
+              // Position tracking
+              void updateEPosition(double e) { ePosition_ = e; }
+              double getCurrentEPosition() const { return ePosition_; }
+              // Feed rate tracking
+              void updateFeedRate(double feed) { feedRate_ = feed; }
+              double getCurrentFeedRate() const { return feedRate_; }
+              // Layer tracking
+              void incrementLayer() { currentLayer_++; }
+              void setCurrentLayer(int layer) { currentLayer_ = layer; }
+              void setLayerHeight(double height) { layerHeight_ = height; }
+              int getCurrentLayer() const { return currentLayer_; }
+              double getCurrentLayerHeight() const { return layerHeight_; }
+              // Fan tracking
+              void updateFanSpeed(int speed) { fanSpeed_ = speed; }
+              int getCurrentFanSpeed() const { return fanSpeed_; }
+              // Target temperature tracking
+              void setHotendTargetTemp(double temp) { hotendTargetTemp_ = temp; }
+              void setBedTargetTemp(double temp) { bedTargetTemp_ = temp; }
+              double getHotendTargetTemp() const { return hotendTargetTemp_; }
+              double getBedTargetTemp() const { return bedTargetTemp_; }
+              // Actual temperature caching (hotend)
+              void updateHotendActualTemp(double temp) {
+                     std::lock_guard<std::mutex> lock(tempMutex_);
+                     hotendActualTemp_ = temp;
+                     hotendTempTime_ = std::chrono::steady_clock::now();
+              }
 
-        double getCurrentEPosition() const { return ePosition_; }
+              bool isHotendTempFresh(int maxAgeMs = 3000) const {
+                     std::lock_guard<std::mutex> lock(tempMutex_);
+                     auto age = std::chrono::steady_clock::now() - hotendTempTime_;
+                     return age < std::chrono::milliseconds(maxAgeMs);
+              }
 
-        // Feed rate tracking
-        void updateFeedRate(double feed) {
-            feedRate_ = feed;
-            lastUpdate_ = now();
-        }
+              double getCachedHotendTemp() const {
+                     std::lock_guard<std::mutex> lock(tempMutex_);
+                     return hotendActualTemp_;
+              }
 
-        double getCurrentFeedRate() const { return feedRate_; }
+              // Actual temperature caching (bed)
+              void updateBedActualTemp(double temp) {
+                     std::lock_guard<std::mutex> lock(tempMutex_);
+                     bedActualTemp_ = temp;
+                     bedTempTime_ = std::chrono::steady_clock::now();
+              }
 
-        // Layer tracking
-        void incrementLayer() {
-            currentLayer_++;
-            lastUpdate_ = now();
-        }
+              bool isBedTempFresh(int maxAgeMs = 3000) const {
+                     std::lock_guard<std::mutex> lock(tempMutex_);
+                     auto age = std::chrono::steady_clock::now() - bedTempTime_;
+                     return age < std::chrono::milliseconds(maxAgeMs);
+              }
 
-        void setCurrentLayer(int layer) {
-            currentLayer_ = layer;
-            lastUpdate_ = now();
-        }
+              double getCachedBedTemp() const {
+                     std::lock_guard<std::mutex> lock(tempMutex_);
+                     return bedActualTemp_;
+              }
 
-        void setLayerHeight(double height) {
-            layerHeight_ = height;
-            lastUpdate_ = now();
-        }
+              // Command tracking
+              void updateLastCommand(const std::string &cmd) {
+                     std::lock_guard<std::mutex> lock(cmdMutex_);
+                     lastCommand_ = cmd;
+              }
 
-        int getCurrentLayer() const { return currentLayer_; }
-        double getCurrentLayerHeight() const { return layerHeight_; }
+              std::string getLastCommand() const {
+                     std::lock_guard<std::mutex> lock(cmdMutex_);
+                     return lastCommand_;
+              }
 
-        // Fan tracking
-        void updateFanSpeed(int speed) {
-            fanSpeed_ = speed;
-            lastUpdate_ = now();
-        }
+              // Statistics
+              void incrementCommandCount() { commandCount_++; }
+              size_t getCommandCount() const { return commandCount_; }
+              // Reset for new job
+              void resetForNewJob() {
+                     ePosition_ = 0.0;
+                     currentLayer_ = 0;
+                     commandCount_ = 0;
+                     layerHeight_ = 0.2; // Default
+                     std::lock_guard<std::mutex> lock(cmdMutex_);
+                     lastCommand_.clear();
+              }
 
-        int getCurrentFanSpeed() const { return fanSpeed_; }
+       private:
+              StateTracker() : ePosition_(0.0), feedRate_(1000.0), currentLayer_(0), layerHeight_(0.2), fanSpeed_(0),
+                               commandCount_(0),
+                               hotendTargetTemp_(0.0), bedTargetTemp_(0.0),
+                               hotendActualTemp_(0.0), bedActualTemp_(0.0) {
+              }
 
-        // Temperature tracking (cached)
-        void updateHotendTemp(double temp) {
-            std::lock_guard<std::mutex> lock(tempMutex_);
-            hotendTemp_ = temp;
-            hotendTempTime_ = now();
-        }
+              // Position and motion state
+              std::atomic<double> ePosition_;
+              std::atomic<double> feedRate_;
+              std::atomic<int> currentLayer_;
+              std::atomic<double> layerHeight_;
+              std::atomic<int> fanSpeed_;
+              std::atomic<size_t> commandCount_;
+              // Target temperatures (from M104/M140)
+              std::atomic<double> hotendTargetTemp_;
+              std::atomic<double> bedTargetTemp_;
 
-        void updateBedTemp(double temp) {
-            std::lock_guard<std::mutex> lock(tempMutex_);
-            bedTemp_ = temp;
-            bedTempTime_ = now();
-        }
+              // Actual temperatures (from queries) with cache
+              mutable std::mutex tempMutex_;
+              double hotendActualTemp_;
+              double bedActualTemp_;
+              std::chrono::steady_clock::time_point hotendTempTime_;
+              std::chrono::steady_clock::time_point bedTempTime_;
 
-        bool isHotendTempFresh(int maxAgeMs = 5000) const {
-            std::lock_guard<std::mutex> lock(tempMutex_);
-            return (now() - hotendTempTime_) < std::chrono::milliseconds(maxAgeMs);
-        }
-
-        double getCachedHotendTemp() const {
-            std::lock_guard<std::mutex> lock(tempMutex_);
-            return hotendTemp_;
-        }
-
-        double getCachedBedTemp() const {
-            std::lock_guard<std::mutex> lock(tempMutex_);
-            return bedTemp_;
-        }
-
-        // Command tracking
-        void updateLastCommand(const std::string &cmd) {
-            std::lock_guard<std::mutex> lock(cmdMutex_);
-            lastCommand_ = cmd;
-            lastUpdate_ = now();
-        }
-
-        std::string getLastCommand() const {
-            std::lock_guard<std::mutex> lock(cmdMutex_);
-            return lastCommand_;
-        }
-
-        // Statistics
-        void incrementCommandCount() { commandCount_++; }
-        size_t getCommandCount() const { return commandCount_; }
-
-        std::chrono::steady_clock::time_point getLastUpdateTime() const { return lastUpdate_; }
-
-        // Reset for new job
-        void resetForNewJob() {
-            ePosition_ = 0.0;
-            currentLayer_ = 0;
-            commandCount_ = 0;
-            layerHeight_ = 0.2; // Default
-            lastUpdate_ = now();
-
-            std::lock_guard<std::mutex> lock(cmdMutex_);
-            lastCommand_.clear();
-        }
-
-    private:
-        StateTracker() : ePosition_(0.0), feedRate_(1000.0), currentLayer_(0),
-                         layerHeight_(0.2), fanSpeed_(0), commandCount_(0),
-                         hotendTemp_(0.0), bedTemp_(0.0) {
-        }
-
-        std::atomic<double> ePosition_;
-        std::atomic<double> feedRate_;
-        std::atomic<int> currentLayer_;
-        std::atomic<double> layerHeight_;
-        std::atomic<int> fanSpeed_;
-        std::atomic<size_t> commandCount_;
-        std::atomic<std::chrono::steady_clock::time_point> lastUpdate_;
-
-        // Temperature cache with timestamps
-        mutable std::mutex tempMutex_;
-        double hotendTemp_;
-        double bedTemp_;
-        std::chrono::steady_clock::time_point hotendTempTime_;
-        std::chrono::steady_clock::time_point bedTempTime_;
-
-        // Command tracking
-        mutable std::mutex cmdMutex_;
-        std::string lastCommand_;
-
-        static std::chrono::steady_clock::time_point now() {
-            return std::chrono::steady_clock::now();
-        }
-    };
+              // Command tracking
+              mutable std::mutex cmdMutex_;
+              std::string lastCommand_;
+       };
 } // namespace core::state

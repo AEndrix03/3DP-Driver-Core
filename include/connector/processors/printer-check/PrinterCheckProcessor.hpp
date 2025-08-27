@@ -9,7 +9,6 @@
 #include "../../models/printer-check/PrinterCheckResponse.hpp"
 #include "../../events/printer-check/PrinterCheckSender.hpp"
 #include "core/DriverInterface.hpp"
-#include "core/printer/PrintState.hpp"
 #include "core/queue/CommandExecutorQueue.hpp"
 #include <memory>
 #include <string>
@@ -42,26 +41,26 @@ namespace connector::processors::printer_check {
 
         void sendErrorResponse(const std::string &jobId, const std::string &error);
 
-        // Helper methods to collect printer state
-        void collectPositionData(connector::models::printer_check::PrinterCheckResponse &response);
+        void collectPositionDataAsync(models::printer_check::PrinterCheckResponse &response) const;
 
-        void collectTemperatureData(connector::models::printer_check::PrinterCheckResponse &response);
+        void collectTemperatureDataAsync(models::printer_check::PrinterCheckResponse &response) const;
 
-        void collectFanData(connector::models::printer_check::PrinterCheckResponse &response);
+        static void collectFanDataAsync(models::printer_check::PrinterCheckResponse &response);
 
-        void collectJobStatusData(connector::models::printer_check::PrinterCheckResponse &response,
-                                  const std::string &jobId);
+        static void collectJobStatusDataAsync(models::printer_check::PrinterCheckResponse &response,
+                                              const std::string &jobId);
 
-        void collectDiagnosticData(connector::models::printer_check::PrinterCheckResponse &response);
+        void collectDiagnosticDataAsync(models::printer_check::PrinterCheckResponse &response) const;
+
+        static double parseTemperatureFromResponse(const std::string &response);
+
+        static std::string formatDouble(double value);
 
         // State management
         std::string getJobStatusCode(const std::string &jobId) const;
 
         std::string getPrinterStatusCode() const;
 
-        // Helper parsers
-        std::string parseTemperatureFromResponse(const std::string &response) const;
-
-        std::string parseFanFromResponse(const std::string &response) const;
+        static std::string parseFanFromResponse(const std::string &response);
     };
 } // namespace connector::processors::printer_check

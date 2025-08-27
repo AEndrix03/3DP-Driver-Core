@@ -52,7 +52,7 @@ namespace translator::gcode {
             double eValue = params.at("E");
             stateTracker.updateEPosition(eValue);
         }
-        // Track command for diagnostics
+        // Build command string for tracking
         std::ostringstream cmdStr;
         cmdStr << command;
         for (const auto &[key, value]: params) {
@@ -60,6 +60,7 @@ namespace translator::gcode {
         }
         stateTracker.updateLastCommand(cmdStr.str());
         stateTracker.incrementCommandCount();
+        // Layer detection from Z moves
         if (params.count("Z")) {
             static double lastZ = 0.0;
             double currentZ = params.at("Z");
@@ -71,11 +72,13 @@ namespace translator::gcode {
             lastZ = currentZ;
         }
 
+        // Update job progress if we have an active job
         std::string currentJobId = jobTracker.getCurrentJobId();
         if (!currentJobId.empty()) {
             jobTracker.updateJobProgress(currentJobId, cmdStr.str());
         }
 
+        // Execute actual motion command
         if (command == "G0" || command == "G1") {
             double x = params.count("X") ? params.at("X") : -1;
             double y = params.count("Y") ? params.at("Y") : -1;

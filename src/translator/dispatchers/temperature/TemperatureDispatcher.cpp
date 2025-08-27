@@ -24,18 +24,13 @@ namespace translator::gcode {
     void TemperatureDispatcher::handle(const std::string &command, const std::map<std::string, double> &params) {
         auto &stateTracker = core::state::StateTracker::getInstance();
         double temp = params.at("S");
-        if (command == "M104") {
-            auto result = driver_->temperature()->setHotendTemperature(temp);
-            if (result.isSuccess()) {
-                stateTracker.updateHotendTemp(temp); // Cache target temp
-            }
-        } else if (command == "M140") {
-            auto result = driver_->temperature()->setBedTemperature(temp);
-            if (result.isSuccess()) {
-                stateTracker.updateBedTemp(temp); // Cache target temp
-            }
-        }
 
-        stateTracker.updateLastCommand(command + " S" + std::to_string(static_cast<int>(temp)));
+        if (command == "M104") {
+            driver_->temperature()->setHotendTemperature(temp);
+            stateTracker.setHotendTargetTemp(temp); // Target, not actual
+        } else if (command == "M140") {
+            driver_->temperature()->setBedTemperature(temp);
+            stateTracker.setBedTargetTemp(temp); // Target, not actual
+        }
     }
 } // namespace translator::gcode

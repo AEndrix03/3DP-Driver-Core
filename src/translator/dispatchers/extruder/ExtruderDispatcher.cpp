@@ -29,14 +29,14 @@ namespace translator::gcode {
             auto result = driver_->extruder()->retract(length, feedrate);
             if (result.isSuccess()) {
                 double currentE = stateTracker.getCurrentEPosition();
-                stateTracker.updateEPosition(currentE - length); // Subtract for retract
+                stateTracker.updateEPosition(currentE - length);
             }
         } else if (command == "G11") {
             // Extrude/unretract
             auto result = driver_->extruder()->extrude(length, feedrate);
             if (result.isSuccess()) {
                 double currentE = stateTracker.getCurrentEPosition();
-                stateTracker.updateEPosition(currentE + length); // Add for extrude
+                stateTracker.updateEPosition(currentE + length);
             }
         }
 

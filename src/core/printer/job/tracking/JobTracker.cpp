@@ -3,10 +3,9 @@
 //
 
 #include "core/printer/job/tracking/JobTracker.hpp"
+
 #include "logger/Logger.hpp"
 #include <algorithm>
-#include <optional>
-#include <vector>
 
 namespace core::jobs {
     JobTracker &JobTracker::getInstance() {
@@ -16,7 +15,6 @@ namespace core::jobs {
 
     void JobTracker::startJob(const std::string &jobId, size_t totalCommands) {
         std::lock_guard<std::mutex> lock(jobsMutex_);
-
         JobInfo info;
         info.jobId = jobId;
         info.state = core::print::JobState::RUNNING;
@@ -24,28 +22,22 @@ namespace core::jobs {
         info.lastUpdate = info.startTime;
         info.totalCommands = totalCommands;
         info.executedCommands = 0;
-
         jobs_[jobId] = std::move(info);
         currentJobId_ = jobId;
         stats_.totalJobs++;
-
-        Logger::logInfo("[JobTracker] Started job: " + jobId +
-                        " (" + std::to_string(totalCommands) + " commands)");
+        Logger::logInfo("[JobTracker] Started job: " + jobId + " (" + std::to_string(totalCommands) + " commands)");
     }
 
     void JobTracker::updateJobProgress(const std::string &jobId, const std::string &currentCommand) {
         std::lock_guard<std::mutex> lock(jobsMutex_);
-
         auto it = jobs_.find(jobId);
         if (it == jobs_.end()) return;
-
         it->second.executedCommands++;
         it->second.currentCommand = currentCommand;
         it->second.lastUpdate = std::chrono::steady_clock::now();
-
         // Auto-complete if all commands executed
-        if (it->second.executedCommands >= it->second.totalCommands &&
-            it->second.state == core::print::JobState::RUNNING) {
+        if (it->second.executedCommands >= it->second.totalCommands && it->second.state ==
+            core::print::JobState::RUNNING) {
             updateJobState(jobId, core::print::JobState::COMPLETED);
         }
     }
@@ -106,16 +98,13 @@ namespace core::jobs {
     std::vector<JobInfo> JobTracker::getActiveJobs() const {
         std::lock_guard<std::mutex> lock(jobsMutex_);
         std::vector<JobInfo> active;
-
         for (const auto &[id, info]: jobs_) {
-            if (info.state == core::print::JobState::RUNNING ||
-                info.state == core::print::JobState::PAUSED ||
+            if (info.state == core::print::JobState::RUNNING || info.state == core::print::JobState::PAUSED ||
                 info.state == core::print::JobState::LOADING ||
                 info.state == core::print::JobState::HEATING) {
                 active.push_back(info);
             }
         }
-
         return active;
     }
 
@@ -144,7 +133,6 @@ namespace core::jobs {
     void JobTracker::cleanupCompletedJobs() {
         // Keep only last 100 completed jobs to prevent memory leak
         constexpr size_t MAX_COMPLETED_JOBS = 100;
-
         std::vector<std::pair<std::string, std::chrono::steady_clock::time_point> > completed;
         for (const auto &[id, info]: jobs_) {
             if (info.state == core::print::JobState::COMPLETED ||

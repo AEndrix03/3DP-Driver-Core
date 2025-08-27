@@ -4,14 +4,10 @@
 
 #pragma once
 
-#include <atomic>
 #include <string>
 #include <unordered_map>
 #include <mutex>
-#include <functional>
-#include <chrono>
-#include <thread>
-#include <bits/fs_fwd.h>
+#include <algorithm>
 
 namespace core::config {
     struct PrinterCheckConfig {
@@ -52,11 +48,9 @@ namespace core::config {
         static ConfigManager &getInstance();
 
         // Load configuration
-        void loadFromFile(const std::string &configPath = "config.json");
+        void loadDefaults();
 
         void loadFromEnv();
-
-        bool reload();
 
         // Configuration access
         PrinterCheckConfig getPrinterCheckConfig() const;
@@ -71,54 +65,16 @@ namespace core::config {
         template<typename T>
         T get(const std::string &key, const T &defaultValue) const;
 
-        // Hot reload support
-        void enableHotReload(std::chrono::milliseconds checkInterval = std::chrono::seconds(30));
-
-        void disableHotReload();
-
-        // Change notifications
-        using ConfigChangeCallback = std::function<void(const std::string &key, const std::string &oldValue,
-                                                        const std::string &newValue)>;
-
-        void registerChangeCallback(const std::string &key, ConfigChangeCallback callback);
-
-        // Validation
-        struct ValidationResult {
-            bool isValid = true;
-            std::vector<std::string> errors;
-        };
-
-        ValidationResult validate() const;
-
     private:
-        ConfigManager() = default;
+        ConfigManager() { loadDefaults(); }
 
         mutable std::mutex configMutex_;
         std::unordered_map<std::string, std::string> config_;
-        std::unordered_map<std::string, ConfigChangeCallback> changeCallbacks_;
-
-        std::string configPath_;
-        std::filesystem::file_time_type lastModified_;
-        std::thread hotReloadThread_;
-        std::atomic<bool> hotReloadEnabled_{false};
-
-        void hotReloadLoop();
-
-        void notifyChange(const std::string &key, const std::string &oldValue, const std::string &newValue);
-
-        // Type converters
-        template<typename T>
-        T convertValue(const std::string &value) const;
-
-        void setDefaults();
-
-        bool fileChanged() const;
     };
 
     // Template specializations
     template<>
     inline int ConfigManager::get<int>(const std::string &key, const int &defaultValue) const {
-        std::lock_guard<std::mutex> lock(configMutex_);
         auto it = config_.find(key);
         if (it == config_.end()) return defaultValue;
         try {
@@ -130,14 +86,12 @@ namespace core::config {
 
     template<>
     inline std::string ConfigManager::get<std::string>(const std::string &key, const std::string &defaultValue) const {
-        std::lock_guard<std::mutex> lock(configMutex_);
         auto it = config_.find(key);
         return (it != config_.end()) ? it->second : defaultValue;
     }
 
     template<>
     inline bool ConfigManager::get<bool>(const std::string &key, const bool &defaultValue) const {
-        std::lock_guard<std::mutex> lock(configMutex_);
         auto it = config_.find(key);
         if (it == config_.end()) return defaultValue;
         return it->second == "true" || it->second == "1";
@@ -145,7 +99,6 @@ namespace core::config {
 
     template<>
     inline double ConfigManager::get<double>(const std::string &key, const double &defaultValue) const {
-        std::lock_guard<std::mutex> lock(configMutex_);
         auto it = config_.find(key);
         if (it == config_.end()) return defaultValue;
         try {
