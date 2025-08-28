@@ -9,6 +9,7 @@
 #include "types/Result.hpp"
 #include <memory>
 #include <string>
+#include <mutex>
 
 namespace core {
 
@@ -35,6 +36,8 @@ namespace core {
     private:
         std::shared_ptr<SerialPort> serial_;
         std::shared_ptr<CommandContext> context_;
+
+        std::mutex serialMutex_;
 
         types::Result parseResponse(const std::string &response, uint16_t expectedNumber);
     };

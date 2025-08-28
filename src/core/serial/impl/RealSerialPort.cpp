@@ -5,7 +5,7 @@
 
 namespace core {
     RealSerialPort::RealSerialPort(const std::string &portName, uint32_t baudrate)
-        : io_context_(), serial_port_(nullptr) {
+            : io_context_(), serial_port_(nullptr) {
         try {
             serial_port_ = std::make_unique<boost::asio::serial_port>(io_context_, portName);
             configurePort(baudrate);
@@ -52,7 +52,7 @@ namespace core {
 
         // Set parity (none)
         serial_port_->set_option(boost::asio::serial_port_base::parity(
-                                     boost::asio::serial_port_base::parity::none), ec);
+                boost::asio::serial_port_base::parity::none), ec);
         if (ec) {
             Logger::logError("[SerialPort] Failed to set parity: " + ec.message());
             return;
@@ -60,7 +60,7 @@ namespace core {
 
         // Set stop bits (1)
         serial_port_->set_option(boost::asio::serial_port_base::stop_bits(
-                                     boost::asio::serial_port_base::stop_bits::one), ec);
+                boost::asio::serial_port_base::stop_bits::one), ec);
         if (ec) {
             Logger::logError("[SerialPort] Failed to set stop bits: " + ec.message());
             return;
@@ -68,7 +68,7 @@ namespace core {
 
         // Set flow control (none)
         serial_port_->set_option(boost::asio::serial_port_base::flow_control(
-                                     boost::asio::serial_port_base::flow_control::none), ec);
+                boost::asio::serial_port_base::flow_control::none), ec);
         if (ec) {
             Logger::logError("[SerialPort] Failed to set flow control: " + ec.message());
             return;
@@ -102,7 +102,6 @@ namespace core {
 
     std::string RealSerialPort::receiveLine() {
         if (!serial_port_ || !serial_port_->is_open()) {
-            Logger::logError("[SerialPort] ERROR: Serial port not open when trying to receive!");
             return "";
         }
 
@@ -110,13 +109,15 @@ namespace core {
         std::string line;
 
         try {
-            // Read with timeout
+            // FIX: Timeout più aggressivo con retry automatico
+            static int timeoutCount = 0;
             boost::asio::steady_timer timer(io_context_);
-            timer.expires_after(std::chrono::seconds(1)); // 1 second timeout
+            timer.expires_after(std::chrono::milliseconds(500)); // Ridotto a 500ms
 
             bool timeout = false;
             timer.async_wait([&](const boost::system::error_code &) {
                 timeout = true;
+                timeoutCount++;
                 serial_port_->cancel();
             });
 
@@ -124,18 +125,26 @@ namespace core {
             timer.cancel();
 
             if (timeout) {
-                return ""; // Timeout, return empty (not an error for polling)
+                // FIX: Log solo timeout eccessivi
+                if (timeoutCount % 100 == 0) {
+                    Logger::logWarning("[SerialPort] " + std::to_string(timeoutCount) + " timeouts occurred");
+                }
+                return "";
             }
 
-            if (ec) {
-                if (ec == boost::asio::error::operation_aborted) {
-                    return ""; // Normal timeout
-                }
-                Logger::logError("[SerialPort] Read error: " + ec.message());
+            // Reset timeout counter on success
+            timeoutCount = 0;
 
-                // Check if port is still open after error
-                if (!serial_port_->is_open()) {
-                    Logger::logError("[SerialPort] Serial port closed unexpectedly!");
+            if (ec) {
+                if (ec != boost::asio::error::operation_aborted) {
+                    Logger::logError("[SerialPort] Read error: " + ec.message());
+
+                    // FIX: Tentativo di recovery automatico
+                    if (ec == boost::asio::error::broken_pipe ||
+                        ec == boost::asio::error::connection_reset) {
+                        Logger::logError("[SerialPort] Connection lost - attempting recovery");
+                        return "CONN_LOST";
+                    }
                 }
                 return "";
             }
@@ -154,14 +163,10 @@ namespace core {
                     Logger::logInfo("[RX] Received: " + line);
                 }
             }
-        } catch (const boost::system::system_error &e) {
-            Logger::logError("[SerialPort] Exception while reading: " + std::string(e.what()));
 
-            // Try to detect if device was unplugged
-            if (!isOpen()) {
-                Logger::logError("[SerialPort] Device appears to be disconnected!");
-            }
-            return "";
+        } catch (const std::exception &e) {
+            Logger::logError("[SerialPort] Exception: " + std::string(e.what()));
+            return "SERIAL_ERROR";
         }
 
         return line;

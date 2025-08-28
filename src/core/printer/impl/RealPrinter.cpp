@@ -7,7 +7,7 @@
 
 namespace core {
     RealPrinter::RealPrinter(std::shared_ptr<SerialPort> serial)
-        : serial_(std::move(serial)) {
+            : serial_(std::move(serial)) {
     }
 
     void RealPrinter::initialize() {
@@ -66,6 +66,7 @@ namespace core {
     }
 
     void RealPrinter::handleSystemMessage(const std::string &line) {
+        Logger::logInfo(line);
         if (line.find("Avvio firmware 3DP...") != std::string::npos) {
             Logger::logWarning("[Printer] Arduino reset detected! System restarting...");
             systemReady_ = false;

@@ -32,15 +32,28 @@ namespace core::jobs {
         std::lock_guard<std::mutex> lock(jobsMutex_);
         auto it = jobs_.find(jobId);
         if (it == jobs_.end()) return;
+
         it->second.executedCommands++;
         it->second.currentCommand = currentCommand;
         it->second.lastUpdate = std::chrono::steady_clock::now();
-        // Auto-complete if all commands executed
-        if (it->second.executedCommands >= it->second.totalCommands && it->second.state ==
-            core::print::JobState::RUNNING) {
+
+        // FIX: Log progresso ogni 1000 comandi
+        if (it->second.executedCommands % 1000 == 0) {
+            float progress = it->second.getProgress();
+            Logger::logInfo("[JobTracker] Job " + jobId + " progress: " +
+                            std::to_string(int(progress)) + "% (" +
+                            std::to_string(it->second.executedCommands) + "/" +
+                            std::to_string(it->second.totalCommands) + ")");
+        }
+
+        // Auto-complete check
+        if (it->second.executedCommands >= it->second.totalCommands &&
+            it->second.state == core::print::JobState::RUNNING) {
             updateJobState(jobId, core::print::JobState::COMPLETED);
+            Logger::logInfo("[JobTracker] Job " + jobId + " completed automatically");
         }
     }
+
 
     void JobTracker::completeJob(const std::string &jobId) {
         std::lock_guard<std::mutex> lock(jobsMutex_);

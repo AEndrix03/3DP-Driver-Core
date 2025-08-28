@@ -54,6 +54,8 @@ namespace core::print {
 
         std::unique_ptr<GCodeDownloader> downloader_;
 
+        bool startPrintJobInternal(const std::string &gcodePath, const std::string &jobId);
+
         void onDownloadProgress(const DownloadProgress &progress);
 
         void onDownloadCompleted(bool success, const std::string &filePath, const std::string &error);

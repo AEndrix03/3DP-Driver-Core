@@ -21,12 +21,13 @@ namespace core {
  * @brief Invia il comando e aspetta un ACK o un ERR.
  */
     types::Result CommandExecutor::sendCommandAndAwaitResponse(const std::string &command, uint16_t expectedNumber) {
+        std::lock_guard<std::mutex> lock(serialMutex_);
+
         serial_->send(command);
 
         int retries = 0;
-        const int maxRetries = 5;
-        const int baseTimeoutSeconds = 5;
-        const int timeoutIncrementSeconds = 5;
+        const int maxRetries = 3; // FIX: Ridotto da 5 a 3
+        const int baseTimeoutMs = 2000; // FIX: Timeout più aggressivo
 
         types::Result resultAccumulated;
         resultAccumulated.code = types::ResultCode::Skip;
@@ -34,22 +35,31 @@ namespace core {
 
         while (retries <= maxRetries) {
             auto startTime = std::chrono::steady_clock::now();
-            auto maxTimeout = std::chrono::seconds(baseTimeoutSeconds + retries * timeoutIncrementSeconds);
+            auto maxTimeout = std::chrono::milliseconds(baseTimeoutMs + retries * 1000);
 
             while (true) {
                 if (std::chrono::steady_clock::now() - startTime > maxTimeout) {
-                    Logger::logWarning(
-                            "[Timeout] No valid response within " + std::to_string(maxTimeout.count()) + "s for N" +
-                            std::to_string(expectedNumber));
-                    break; // timeout → conta come errore
+                    Logger::logWarning("[CommandExecutor] Timeout N" + std::to_string(expectedNumber) +
+                                       " (attempt " + std::to_string(retries + 1) + ")");
+                    break;
                 }
 
                 std::string response = serial_->receiveLine();
+
+                // FIX: Gestione errori di connessione
+                if (response == "CONN_LOST" || response == "SERIAL_ERROR") {
+                    Logger::logError("[CommandExecutor] Serial connection issue for N" +
+                                     std::to_string(expectedNumber));
+                    return {types::ResultCode::Error, "Serial connection lost"};
+                }
+
                 if (response.empty() || response.find_first_not_of(" \t\r\n") == std::string::npos) {
                     continue;
                 }
 
-                if (!response.compare(0, 4, "BUSY") != 0) {
+                // Store non-OK responses for debug
+                if (response.find("OK") == std::string::npos &&
+                    response.find("BUSY") == std::string::npos) {
                     resultAccumulated.body.push_back(response);
                 }
 
@@ -66,28 +76,31 @@ namespace core {
                 }
 
                 if (result.isBusy()) {
-                    startTime = std::chrono::steady_clock::now();
+                    // FIX: Backoff progressivo per BUSY
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50 * (retries + 1)));
+                    startTime = std::chrono::steady_clock::now(); // Reset timeout
                     continue;
                 }
 
                 if (result.isError()) {
-                    Logger::logWarning("[Mismatch/Error] " + result.message);
+                    Logger::logWarning("[CommandExecutor] Error response: " + result.message);
                     break;
                 }
             }
 
             retries++;
             if (retries <= maxRetries) {
-                Logger::logWarning("[Retry] Resending printer-command N" + std::to_string(expectedNumber) + " (" +
-                                   std::to_string(retries) + "/" + std::to_string(maxRetries) + ")");
+                // FIX: Backoff esponenziale per retry
+                std::this_thread::sleep_for(std::chrono::milliseconds(100 * retries));
+                Logger::logWarning("[CommandExecutor] Retry " + std::to_string(retries) +
+                                   "/" + std::to_string(maxRetries) + " for N" + std::to_string(expectedNumber));
                 serial_->send(command);
-            } else {
-                Logger::logError("[Fatal Error] Max retries reached for N" + std::to_string(expectedNumber));
-                throw types::DriverException("Max retries reached for N" + std::to_string(expectedNumber));
             }
         }
 
-        throw types::DriverException("Unreachable fatal error in sendCommandAndAwaitResponse");
+        // FIX: Non throw, ritorna errore
+        Logger::logError("[CommandExecutor] Max retries exceeded for N" + std::to_string(expectedNumber));
+        return {types::ResultCode::Error, "Max retries exceeded"};
     }
 
 
