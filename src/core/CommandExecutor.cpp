@@ -21,6 +21,8 @@ namespace core {
  * @brief Invia il comando e aspetta un ACK o un ERR.
  */
     types::Result CommandExecutor::sendCommandAndAwaitResponse(const std::string &command, uint16_t expectedNumber) {
+        std::lock_guard<std::mutex> lock(serialMutex_);
+
         serial_->send(command);
 
         int retries = 0;

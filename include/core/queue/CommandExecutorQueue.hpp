@@ -16,7 +16,6 @@
 #include <fstream>
 
 namespace core {
-    static constexpr size_t MAX_COMMANDS_IN_RAM = 2000;
 
     struct PriorityCommand {
         std::string command;
@@ -67,8 +66,9 @@ namespace core {
 
     private:
         std::shared_ptr<translator::gcode::GCodeTranslator> translator_;
-        std::priority_queue<PriorityCommand> commandQueue_;
-        std::deque<PriorityCommand> diskQueue_;
+        std::priority_queue<PriorityCommand> commandQueue_;      // 10k commands in RAM
+        std::priority_queue<PriorityCommand> pagingBuffer_;      // 5k intermediate buffer
+        std::deque<PriorityCommand> diskQueue_;                  // On-disk storage
         std::fstream diskFile_;
         mutable std::mutex queueMutex_;
         mutable std::mutex diskMutex_;
@@ -88,6 +88,10 @@ namespace core {
         void updateStats(bool executed, bool error);
 
         void pageCommandsToDisk();
+
+        void flushPagingBufferToDisk();       // NEW: Flush 5k buffer to disk
+
+        void loadFromPagingBuffer();          // NEW: Load from 5k buffer to main queue
 
         void loadCommandsFromDisk();
 

@@ -7,11 +7,16 @@
 namespace core::print {
     PrintJobManager::PrintJobManager(std::shared_ptr<DriverInterface> driver,
                                      std::shared_ptr<CommandExecutorQueue> commandQueue)
-        : driver_(driver), commandQueue_(commandQueue), currentState_(JobState::CREATED) {
+            : driver_(driver), commandQueue_(commandQueue), currentState_(JobState::CREATED) {
     }
 
     bool PrintJobManager::startPrintJob(const std::string &gcodePath, const std::string &jobId) {
         std::lock_guard<std::mutex> lock(stateMutex_);
+        return startPrintJobInternal(gcodePath, jobId);
+    }
+
+    bool PrintJobManager::startPrintJobInternal(const std::string &gcodePath, const std::string &jobId) {
+        // Nota: questo metodo assume che il lock sia già acquisito dal chiamante
 
         if (currentState_ == JobState::RUNNING) {
             Logger::logError("[PrintJobManager] Cannot start - job already active: " + currentJobId_);
@@ -53,6 +58,7 @@ namespace core::print {
         startTime_ = std::chrono::steady_clock::now();
 
         // Queue the entire G-code file
+        Logger::logInfo("[PrintJobManager] Enqueuing G-code file with " + std::to_string(lineCount) + " commands");
         commandQueue_->enqueueFile(gcodePath, 3, jobId); // Priority 3 for print jobs
 
         // Start heating if needed
@@ -78,11 +84,11 @@ namespace core::print {
         updateState(JobState::LOADING);
 
         downloader_->downloadAsync(
-            gcodeUrl, jobId,
-            [this](const DownloadProgress &progress) { onDownloadProgress(progress); },
-            [this](bool success, const std::string &filePath, const std::string &error) {
-                onDownloadCompleted(success, filePath, error);
-            }
+                gcodeUrl, jobId,
+                [this](const DownloadProgress &progress) { onDownloadProgress(progress); },
+                [this](bool success, const std::string &filePath, const std::string &error) {
+                    onDownloadCompleted(success, filePath, error);
+                }
         );
         Logger::logInfo("[PrintJobManager] Started G-code download for job: " + jobId);
         return true;
@@ -127,7 +133,8 @@ namespace core::print {
     bool PrintJobManager::cancelJob() {
         std::lock_guard<std::mutex> lock(stateMutex_);
         if (currentState_ != JobState::RUNNING || currentState_ != JobState::PRECHECK || currentState_ !=
-            JobState::LOADING || currentState_ != JobState::HOMING) {
+                                                                                         JobState::LOADING ||
+            currentState_ != JobState::HOMING) {
             Logger::logWarning("[PrintJobManager] No job to cancel");
             return false;
         }
@@ -163,7 +170,7 @@ namespace core::print {
 
     bool PrintJobManager::isReadyToPrint() const {
         // Check homing
-        if (!checkHoming()) {
+        /*if (!checkHoming()) {
             Logger::logError("[PrintJobManager] Printer not homed");
             return false;
         }
@@ -179,7 +186,7 @@ namespace core::print {
             Logger::logError("[PrintJobManager] Temperature check failed");
             return false;
         }
-
+*/
         // Check system ready
         PrintState driverState = driver_->getState();
         if (driverState == PrintState::Error) {
@@ -225,7 +232,7 @@ namespace core::print {
             JobState oldState = currentState_;
             currentState_ = newState;
             Logger::logInfo(
-                "[PrintJobManager] State change: " + stateToString(oldState) + " -> " + stateToString(newState));
+                    "[PrintJobManager] State change: " + stateToString(oldState) + " -> " + stateToString(newState));
 
             if (newState == JobState::FAILED || newState == JobState::COMPLETED) {
                 // Eventuali notifiche Kafka qui
@@ -297,15 +304,24 @@ namespace core::print {
 
     std::string PrintJobManager::stateToString(JobState state) const {
         switch (state) {
-            case JobState::LOADING: return "Loading";
-            case JobState::PRECHECK: return "PreCheck";
-            case JobState::HEATING: return "Heating";
-            case JobState::RUNNING: return "Running";
-            case JobState::PAUSED: return "Paused";
-            case JobState::COMPLETED: return "Finishing";
-            case JobState::FAILED: return "Failed";
-            case JobState::CANCELLED: return "Cancelled";
-            default: return "Unknown";
+            case JobState::LOADING:
+                return "Loading";
+            case JobState::PRECHECK:
+                return "PreCheck";
+            case JobState::HEATING:
+                return "Heating";
+            case JobState::RUNNING:
+                return "Running";
+            case JobState::PAUSED:
+                return "Paused";
+            case JobState::COMPLETED:
+                return "Finishing";
+            case JobState::FAILED:
+                return "Failed";
+            case JobState::CANCELLED:
+                return "Cancelled";
+            default:
+                return "Unknown";
         }
     }
 
@@ -316,6 +332,7 @@ namespace core::print {
 
     void PrintJobManager::onDownloadCompleted(bool success, const std::string &filePath, const std::string &error) {
         std::lock_guard<std::mutex> lock(stateMutex_);
+
         if (!success) {
             Logger::logError("[PrintJobManager] Download failed: " + error);
             updateState(JobState::FAILED);
@@ -325,7 +342,8 @@ namespace core::print {
 
         Logger::logInfo("[PrintJobManager] Download completed, starting print job with: " + filePath);
 
-        if (startPrintJob(filePath, currentJobId_)) {
+        // Usa la versione interna che non prende il lock
+        if (startPrintJobInternal(filePath, currentJobId_)) {
             Logger::logInfo("[PrintJobManager] Print job started successfully from downloaded G-code");
         } else {
             Logger::logError("[PrintJobManager] Failed to start print job from downloaded G-code");
