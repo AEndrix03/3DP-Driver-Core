@@ -298,7 +298,7 @@ namespace core {
                 });
 
                 // FIX: Log se timeout
-                if (!waitResult && running_) {
+                if (!waitResult && running_ && (!commandQueue_.empty() || !pagingBuffer_.empty())) {
                     Logger::logWarning("[CommandExecutorQueue] Processing thread timeout - checking queues");
                     Logger::logInfo("[CommandExecutorQueue] Queue sizes - RAM: " +
                                     std::to_string(commandQueue_.size()) +

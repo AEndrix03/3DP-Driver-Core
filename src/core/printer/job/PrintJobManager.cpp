@@ -57,6 +57,13 @@ namespace core::print {
         executedLines_ = 0;
         startTime_ = std::chrono::steady_clock::now();
 
+        // Assicurati che la coda di esecuzione sia avviata PRIMA di mettere in coda i comandi:
+        // se si enqueuano comandi quando il thread non è ancora partito, la notify può essere persa.
+        if (commandQueue_ && !commandQueue_->isRunning()) {
+            Logger::logInfo("[PrintJobManager] Starting command executor queue before enqueuing file");
+            commandQueue_->start();
+        }
+
         // Queue the entire G-code file
         Logger::logInfo("[PrintJobManager] Enqueuing G-code file with " + std::to_string(lineCount) + " commands");
         commandQueue_->enqueueFile(gcodePath, 3, jobId); // Priority 3 for print jobs
@@ -65,6 +72,7 @@ namespace core::print {
         updateState(JobState::HEATING);
         // Temperature commands already sent via G-code
 
+        // Assicurati che la coda sia attiva prima di marcare il job come RUNNING
         updateState(JobState::RUNNING);
         Logger::logInfo("[PrintJobManager] Print job started: " + jobId + " (" + std::to_string(lineCount) + " lines)");
 
@@ -132,9 +140,9 @@ namespace core::print {
 
     bool PrintJobManager::cancelJob() {
         std::lock_guard<std::mutex> lock(stateMutex_);
-        if (currentState_ != JobState::RUNNING || currentState_ != JobState::PRECHECK || currentState_ !=
-                                                                                         JobState::LOADING ||
-            currentState_ != JobState::HOMING) {
+        // Il job è cancellabile se si trova in uno degli stati: RUNNING, PRECHECK, LOADING, HOMING
+        if (!(currentState_ == JobState::RUNNING || currentState_ == JobState::PRECHECK ||
+              currentState_ == JobState::LOADING || currentState_ == JobState::HOMING)) {
             Logger::logWarning("[PrintJobManager] No job to cancel");
             return false;
         }
