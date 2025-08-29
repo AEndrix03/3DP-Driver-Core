@@ -34,6 +34,9 @@ namespace core {
     }
 
     void CommandExecutorQueue::start() {
+        std::ostringstream oss;
+        oss << processingThread_.get_id();
+        Logger::logInfo("[CommandExecutorQueue] Thread ID: " + oss.str());
         if (running_) {
             Logger::logWarning("[CommandExecutorQueue] Already running");
             return;
