@@ -7,7 +7,7 @@
 
 namespace core::print {
     PrintJobManager::PrintJobManager(std::shared_ptr<DriverInterface> driver,
-                                     std::shared_ptr<CommandExecutorQueue> commandQueue)
+                                     std::shared_ptr<core::CommandExecutorQueue> commandQueue)
             : driver_(driver), commandQueue_(commandQueue), currentState_(JobState::CREATED) {
     }
 
@@ -370,3 +370,4 @@ namespace core::print {
         }
     }
 } // namespace core::print
+

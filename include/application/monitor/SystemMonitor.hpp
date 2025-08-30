@@ -1,13 +1,10 @@
-//
-// Created by Andrea on 23/08/2025.
-//
-
 #pragma once
 
 #include "connector/controllers/HeartbeatController.hpp"
 #include "connector/controllers/PrinterCommandController.hpp"
 #include "connector/controllers/PrinterCheckController.hpp"
 #include "core/printer/impl/RealPrinter.hpp"
+#include "core/queue/CommandExecutorQueue.hpp"
 #include <memory>
 #include <thread>
 #include <atomic>
@@ -20,7 +17,8 @@ public:
                   std::unique_ptr<connector::controllers::PrinterCommandController> &printerCommandController,
                   std::unique_ptr<connector::controllers::PrinterCheckController> &printerCheckController,
                   std::unique_ptr<connector::controllers::PrinterControlController> &printerControlController,
-                  std::shared_ptr<core::RealPrinter> printer);
+                  std::shared_ptr<core::RealPrinter> printer,
+                  std::shared_ptr<core::CommandExecutorQueue> commandQueue);
 
     ~SystemMonitor();
 
@@ -39,6 +37,7 @@ private:
     std::unique_ptr<connector::controllers::PrinterCheckController> &printerCheckController_;
     std::unique_ptr<connector::controllers::PrinterControlController> &printerControlController_;
     std::shared_ptr<core::RealPrinter> printer_;
+    std::shared_ptr<core::CommandExecutorQueue> commandQueue_;
 
     void monitorLoop();
 

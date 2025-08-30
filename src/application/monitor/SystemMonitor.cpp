@@ -9,12 +9,14 @@ SystemMonitor::SystemMonitor(std::unique_ptr<connector::controllers::HeartbeatCo
                              std::unique_ptr<connector::controllers::PrinterCheckController> &printerCheckController,
                              std::unique_ptr<connector::controllers::PrinterControlController> &
                              printerControlController,
-                             std::shared_ptr<core::RealPrinter> printer)
-    : heartbeatController_(heartbeatController),
-      printerCommandController_(printerCommandController),
-      printerCheckController_(printerCheckController),
-      printerControlController_(printerControlController),
-      printer_(std::move(printer)) {
+                             std::shared_ptr<core::RealPrinter> printer,
+                             std::shared_ptr<core::CommandExecutorQueue> commandQueue_)
+        : heartbeatController_(heartbeatController),
+          printerCommandController_(printerCommandController),
+          printerCheckController_(printerCheckController),
+          printerControlController_(printerControlController),
+          printer_(std::move(printer)),
+          commandQueue_(std::move(commandQueue_)) {
 }
 
 SystemMonitor::~SystemMonitor() {
@@ -74,7 +76,26 @@ void SystemMonitor::monitorLoop() {
 }
 
 void SystemMonitor::reportKafkaStats() const {
-    Logger::logInfo("[SystemMonitor] ===== Kafka Controllers Status =====");
+    Logger::logInfo("[SystemMonitor] ===== System Status Report =====");
+
+    // Command Queue Status - CRITICAL
+    Logger::logInfo("[SystemMonitor] Command Executor Queue:");
+    if (commandQueue_) {
+        bool isRunning = commandQueue_->isRunning();
+        auto stats = commandQueue_->getStatistics();
+        Logger::logInfo("  Running: " + std::string(isRunning ? "TRUE" : "FALSE"));
+        Logger::logInfo("  Total Enqueued: " + std::to_string(stats.totalEnqueued));
+        Logger::logInfo("  Total Executed: " + std::to_string(stats.totalExecuted));
+        Logger::logInfo("  Current Queue Size: " + std::to_string(stats.currentQueueSize));
+        Logger::logInfo("  Errors: " + std::to_string(stats.totalErrors));
+        Logger::logInfo("  Disk Operations: " + std::to_string(stats.diskOperations));
+
+        if (!isRunning && stats.currentQueueSize > 0) {
+            Logger::logError("[SystemMonitor] WARNING: Queue has commands but is not running!");
+        }
+    } else {
+        Logger::logError("[SystemMonitor] Command Queue: NOT AVAILABLE");
+    }
 
     // Heartbeat Controller
     if (heartbeatController_) {
@@ -100,6 +121,10 @@ void SystemMonitor::reportKafkaStats() const {
         Logger::logInfo("  Messages RX: " + std::to_string(stats.messagesReceived));
         Logger::logInfo("  Messages TX: " + std::to_string(stats.messagesSent));
         Logger::logInfo("  Errors: " + std::to_string(stats.processingErrors));
+
+        if (stats.messagesReceived > 0 && stats.messagesProcessed == 0) {
+            Logger::logWarning("[SystemMonitor] WARNING: Commands received but not processed!");
+        }
     } else {
         Logger::logInfo("[SystemMonitor] PrinterCommand Controller: NOT AVAILABLE");
     }

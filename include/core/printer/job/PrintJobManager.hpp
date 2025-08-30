@@ -16,7 +16,7 @@ namespace core::print {
     class PrintJobManager {
     public:
         PrintJobManager(std::shared_ptr<DriverInterface> driver,
-                        std::shared_ptr<CommandExecutorQueue> commandQueue);
+                        std::shared_ptr<core::CommandExecutorQueue> commandQueue);
 
         // Job control
         bool startPrintJob(const std::string &gcodePath, const std::string &jobId);
@@ -41,7 +41,7 @@ namespace core::print {
 
     private:
         std::shared_ptr<DriverInterface> driver_;
-        std::shared_ptr<CommandExecutorQueue> commandQueue_;
+        std::shared_ptr<core::CommandExecutorQueue> commandQueue_;
         mutable std::mutex stateMutex_;
         JobState currentState_;
         std::string currentJobId_;

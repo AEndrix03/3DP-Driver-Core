@@ -92,6 +92,9 @@ namespace core {
         size_t getTotalCommandsAvailable() const;                // Get total pending commands
         void loadFromAllSources();
 
+        void forceLoadFromDisk();                                // Force aggressive loading
+        void flushPagingBufferToDisk();                          // Flush buffer to disk
+
         void closeDiskFile();
 
         void initDiskFile();

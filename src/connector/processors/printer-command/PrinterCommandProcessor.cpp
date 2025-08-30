@@ -8,10 +8,10 @@
 
 namespace connector::processors::printer_command {
     PrinterCommandProcessor::PrinterCommandProcessor(
-        std::shared_ptr<events::printer_command::PrinterCommandSender> sender,
-        std::shared_ptr<core::CommandExecutorQueue> commandQueue,
-        const std::string &driverId)
-        : sender_(sender), commandQueue_(commandQueue), driverId_(driverId) {
+            std::shared_ptr<events::printer_command::PrinterCommandSender> sender,
+            std::shared_ptr<core::CommandExecutorQueue> commandQueue,
+            const std::string &driverId)
+            : sender_(sender), commandQueue_(commandQueue), driverId_(driverId) {
     }
 
     void PrinterCommandProcessor::dispatch(const connector::models::printer_command::PrinterCommandRequest &request) {
@@ -24,18 +24,25 @@ namespace connector::processors::printer_command {
                 return;
             }
 
+            // Ensure command queue is running
+            if (!commandQueue_->isRunning()) {
+                Logger::logInfo("[PrinterCommandProcessor] Starting command executor queue");
+                commandQueue_->start();
+            }
+
             // Split command by ';' separator
             std::vector<std::string> commands = splitCommands(request.command);
             Logger::logInfo(
-                "[PrinterCommandProcessor] Queueing " + std::to_string(commands.size()) + " command(s) with priority: "
-                + std::to_string(request.priority));
+                    "[PrinterCommandProcessor] Queueing " + std::to_string(commands.size()) +
+                    " command(s) with priority: "
+                    + std::to_string(request.priority));
             // Enqueue all commands with same priority and requestId
             commandQueue_->enqueueCommands(commands, request.priority, request.requestId);
 
             // Send immediate acknowledgment that commands were queued
             connector::models::printer_command::PrinterCommandResponse response(
-                driverId_, request.requestId, true, "",
-                "Commands queued for execution (" + std::to_string(commands.size()) + " commands)");
+                    driverId_, request.requestId, true, "",
+                    "Commands queued for execution (" + std::to_string(commands.size()) + " commands)");
 
             sendResponse(response);
             Logger::logInfo("[PrinterCommandProcessor] Commands queued successfully: " + request.requestId);
@@ -46,7 +53,7 @@ namespace connector::processors::printer_command {
     }
 
     void PrinterCommandProcessor::sendResponse(
-        const connector::models::printer_command::PrinterCommandResponse &response) {
+            const connector::models::printer_command::PrinterCommandResponse &response) {
         try {
             if (!response.isValid()) {
                 Logger::logError("[PrinterCommandProcessor] Invalid response created");
@@ -69,7 +76,7 @@ namespace connector::processors::printer_command {
     void PrinterCommandProcessor::sendErrorResponse(const std::string &requestId, const std::string &exception,
                                                     const std::string &message) {
         connector::models::printer_command::PrinterCommandResponse errorResponse(
-            driverId_, requestId, false, exception, message);
+                driverId_, requestId, false, exception, message);
         sendResponse(errorResponse);
     }
 
