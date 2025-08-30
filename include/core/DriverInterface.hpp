@@ -42,6 +42,12 @@ namespace core {
 
         types::Result sendCustomCommand(const std::string &rawCommand) const;
 
+        /**
+         * @brief Resend the last command for health recovery.
+         * Used to break stalls by triggering DUPLICATE response.
+         */
+        void resendLastCommand() const;
+
         PrintState getState() const;
 
         void setState(PrintState newState);

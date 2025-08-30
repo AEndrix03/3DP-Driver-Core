@@ -74,37 +74,36 @@ namespace core {
         mutable std::mutex diskMutex_;
         std::condition_variable queueCondition_;
         std::thread processingThread_;
+        std::thread healthThread_;                               // Health monitor thread
         std::atomic<bool> running_{false};
         std::atomic<bool> stopping_{false};
         std::atomic<uint64_t> nextSequenceId_{1};
+
+        // Health monitoring
+        std::atomic<std::chrono::steady_clock::time_point> lastExecutionTime_;
+        std::atomic<bool> executionStalled_{false};
 
         mutable Statistics stats_;
         mutable std::mutex statsMutex_;
 
         void processingLoop();
 
-        void executeCommand(const PriorityCommand &cmd);
+        void healthMonitorLoop();                                // Health check loop
+        size_t getTotalCommandsAvailable() const;                // Get total pending commands
+        void loadFromAllSources();
+
+        void closeDiskFile();
+
+        void initDiskFile();
+
+        bool loadFromDisk(PriorityCommand &cmd);
+
+        void saveToDisk(const PriorityCommand &cmd);
 
         void updateStats(bool executed, bool error);
 
         void pageCommandsToDisk();
 
-        void flushPagingBufferToDisk();       // NEW: Flush 5k buffer to disk
-
-        void loadFromPagingBuffer();          // NEW: Load from 5k buffer to main queue
-
-        void loadCommandsFromDisk();
-
-        bool needsPaging() const;
-
-        void saveToDisk(const PriorityCommand &cmd);
-
-        bool loadFromDisk(PriorityCommand &cmd);
-
-        void initDiskFile();
-
-        void closeDiskFile();
-
-        void loadFromAllSources();
+        void executeCommand(const PriorityCommand &cmd);
     };
 } // namespace core

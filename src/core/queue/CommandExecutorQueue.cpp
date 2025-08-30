@@ -15,13 +15,14 @@ namespace core {
     static constexpr size_t PAGING_BUFFER_SIZE = 5000;
 
     CommandExecutorQueue::CommandExecutorQueue(std::shared_ptr<translator::gcode::GCodeTranslator> translator)
-            : translator_(std::move(translator)), running_(false), stopping_(false) {
+            : translator_(std::move(translator)), running_(false), stopping_(false),
+              lastExecutionTime_(std::chrono::steady_clock::now()) {
         if (!translator_) {
             throw std::invalid_argument("GCodeTranslator cannot be null");
         }
 
         initDiskFile();
-        Logger::logInfo("[CommandExecutorQueue] Initialized with enhanced paging (10k RAM + 5k buffer)");
+        Logger::logInfo("[CommandExecutorQueue] Initialized with enhanced paging and health monitoring");
     }
 
     CommandExecutorQueue::~CommandExecutorQueue() {
@@ -38,7 +39,11 @@ namespace core {
         running_ = true;
         stopping_ = false;
 
-        Logger::logInfo("[CommandExecutorQueue] Starting with initial queue sizes:");
+        // Reset health tracking
+        lastExecutionTime_ = std::chrono::steady_clock::now();
+        executionStalled_ = false;
+
+        Logger::logInfo("[CommandExecutorQueue] Starting with queue status:");
         {
             std::lock_guard<std::mutex> lock(queueMutex_);
             Logger::logInfo("  RAM Queue: " + std::to_string(commandQueue_.size()));
@@ -49,6 +54,7 @@ namespace core {
             Logger::logInfo("  Disk Queue: " + std::to_string(diskQueue_.size()));
         }
 
+        // Start processing thread
         processingThread_ = std::thread([this]() {
             try {
                 processingLoop();
@@ -57,7 +63,16 @@ namespace core {
             }
         });
 
-        Logger::logInfo("[CommandExecutorQueue] Started processing thread");
+        // Start health monitor thread
+        healthThread_ = std::thread([this]() {
+            try {
+                healthMonitorLoop();
+            } catch (const std::exception &e) {
+                Logger::logError("[CommandExecutorQueue] Health thread crashed: " + std::string(e.what()));
+            }
+        });
+
+        Logger::logInfo("[CommandExecutorQueue] Started processing and health threads");
     }
 
     void CommandExecutorQueue::stop() {
@@ -76,12 +91,218 @@ namespace core {
             processingThread_.join();
         }
 
+        if (healthThread_.joinable()) {
+            healthThread_.join();
+        }
+
         clearQueue();
         Logger::logInfo("[CommandExecutorQueue] Stopped");
     }
 
     bool CommandExecutorQueue::isRunning() const {
         return running_;
+    }
+
+    void CommandExecutorQueue::processingLoop() {
+        Logger::logInfo("[CommandExecutorQueue] Processing loop started");
+
+        size_t executedCount = 0;
+        auto lastLogTime = std::chrono::steady_clock::now();
+
+        while (running_) {
+            PriorityCommand command;
+            bool hasCommand = false;
+
+            {
+                std::unique_lock<std::mutex> lock(queueMutex_);
+
+                // Always try to load from disk/buffer first
+                if (commandQueue_.size() < 100) {  // Keep at least 100 ready
+                    loadFromAllSources();
+                }
+
+                // Check total commands available
+                size_t totalAvailable = getTotalCommandsAvailable();
+
+                if (commandQueue_.empty() && totalAvailable > 0) {
+                    Logger::logWarning("[CommandExecutorQueue] Main queue empty but " +
+                                       std::to_string(totalAvailable) + " commands available elsewhere");
+                    loadFromAllSources();
+                }
+
+                // If still empty, wait briefly
+                if (commandQueue_.empty()) {
+                    queueCondition_.wait_for(lock, std::chrono::milliseconds(50));
+
+                    // Try one more time after wait
+                    if (commandQueue_.empty() && totalAvailable > 0) {
+                        loadFromAllSources();
+                    }
+                }
+
+                // Check for stop condition
+                if (stopping_ && commandQueue_.empty()) {
+                    std::lock_guard<std::mutex> diskLock(diskMutex_);
+                    if (diskQueue_.empty() && pagingBuffer_.empty()) {
+                        break;
+                    }
+                }
+
+                // Get next command
+                if (!commandQueue_.empty()) {
+                    command = commandQueue_.top();
+                    commandQueue_.pop();
+                    hasCommand = true;
+
+                    // Update health tracking
+                    lastExecutionTime_ = std::chrono::steady_clock::now();
+                    executionStalled_ = false;
+                }
+            }
+
+            if (hasCommand) {
+                executeCommand(command);
+                executedCount++;
+
+                // Progress logging
+                if (executedCount % 100 == 0) {
+                    auto now = std::chrono::steady_clock::now();
+                    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - lastLogTime).count();
+
+                    size_t totalRemaining = getTotalCommandsAvailable();
+                    Logger::logInfo("[CommandExecutorQueue] Progress: " + std::to_string(executedCount) +
+                                    " executed, " + std::to_string(totalRemaining) + " remaining, " +
+                                    "rate: " + std::to_string(elapsed > 0 ? 100 / elapsed : 0) + " cmd/s");
+                    lastLogTime = now;
+                }
+            } else {
+                // No command available - brief pause
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        }
+
+        Logger::logInfo("[CommandExecutorQueue] Processing loop finished. Total executed: " +
+                        std::to_string(executedCount));
+    }
+
+    void CommandExecutorQueue::healthMonitorLoop() {
+        Logger::logInfo("[CommandExecutorQueue] Health monitor started");
+
+        while (running_) {
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+
+            if (!running_) break;
+
+            // Check if execution is truly stalled (not just BUSY)
+            auto now = std::chrono::steady_clock::now();
+            auto timeSinceLastExecution = std::chrono::duration_cast<std::chrono::seconds>(
+                    now - lastExecutionTime_.load()).count();
+
+            size_t totalCommands = getTotalCommandsAvailable();
+
+            // Check if command is being executed (global flag from DriverInterface)
+            extern std::atomic<bool> g_commandInProgress;
+            bool commandActive = g_commandInProgress.load();
+
+            // Only consider it stalled if:
+            // 1. We have commands pending
+            // 2. No command is currently executing
+            // 3. Significant time has passed
+            if (totalCommands > 0 && !commandActive && timeSinceLastExecution > 10) {
+                Logger::logWarning("[CommandExecutorQueue] HEALTH CHECK: TRUE STALL DETECTED! " +
+                                   std::to_string(totalCommands) + " commands pending, " +
+                                   std::to_string(timeSinceLastExecution) + "s since last execution");
+
+                // Force recovery by resending last command
+                if (!executionStalled_) {
+                    executionStalled_ = true;
+                    Logger::logWarning("[CommandExecutorQueue] Attempting recovery by resending last command...");
+
+                    // Resend the last command through the driver
+                    // This should trigger a DUPLICATE response and unblock the system
+                    if (translator_ && translator_->getDriver()) {
+                        translator_->getDriver()->resendLastCommand();
+                        Logger::logInfo("[CommandExecutorQueue] Resent last command, expecting DUPLICATE response");
+                    }
+
+                    // Wait for the DUPLICATE to be processed
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+
+                    // Wake processing thread to continue
+                    for (int i = 0; i < 10; ++i) {
+                        queueCondition_.notify_all();
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    }
+
+                    // Reset stall flag after recovery attempt
+                    executionStalled_ = false;
+                }
+            } else if (commandActive) {
+                // Reset stall flag if command is active
+                executionStalled_ = false;
+            }
+
+            // Log periodic status
+            if (totalCommands > 0 && timeSinceLastExecution > 0) {
+                static int statusCounter = 0;
+                if (++statusCounter % 5 == 0) {  // Every 10 seconds
+                    std::lock_guard<std::mutex> lock(queueMutex_);
+                    Logger::logInfo("[CommandExecutorQueue] Health Status: Queue=" +
+                                    std::to_string(commandQueue_.size()) +
+                                    ", Buffer=" + std::to_string(pagingBuffer_.size()) +
+                                    ", Disk=" + std::to_string(diskQueue_.size()) +
+                                    ", LastExec=" + std::to_string(timeSinceLastExecution) + "s ago");
+                }
+            }
+        }
+
+        Logger::logInfo("[CommandExecutorQueue] Health monitor stopped");
+    }
+
+    size_t CommandExecutorQueue::getTotalCommandsAvailable() const {
+        std::lock_guard<std::mutex> diskLock(diskMutex_);
+        return commandQueue_.size() + pagingBuffer_.size() + diskQueue_.size();
+    }
+
+    void CommandExecutorQueue::loadFromAllSources() {
+        size_t loadedFromBuffer = 0;
+        size_t loadedFromDisk = 0;
+
+        // Target to keep 1000 commands in RAM for smooth execution
+        size_t targetLoad = 1000;
+        size_t currentSize = commandQueue_.size();
+
+        if (currentSize >= targetLoad) {
+            return;  // Already have enough
+        }
+
+        size_t toLoad = targetLoad - currentSize;
+
+        // Load from paging buffer first (already sorted)
+        while (!pagingBuffer_.empty() && loadedFromBuffer < toLoad) {
+            commandQueue_.push(pagingBuffer_.top());
+            pagingBuffer_.pop();
+            loadedFromBuffer++;
+        }
+
+        // If still need more, load from disk
+        if (loadedFromBuffer < toLoad) {
+            std::lock_guard<std::mutex> diskLock(diskMutex_);
+            size_t diskToLoad = toLoad - loadedFromBuffer;
+
+            while (!diskQueue_.empty() && loadedFromDisk < diskToLoad) {
+                commandQueue_.push(diskQueue_.front());
+                diskQueue_.pop_front();
+                loadedFromDisk++;
+            }
+        }
+
+        if (loadedFromBuffer > 0 || loadedFromDisk > 0) {
+            Logger::logInfo("[CommandExecutorQueue] Loaded " +
+                            std::to_string(loadedFromBuffer) + " from buffer, " +
+                            std::to_string(loadedFromDisk) + " from disk. " +
+                            "Queue now has " + std::to_string(commandQueue_.size()) + " commands");
+        }
     }
 
     void CommandExecutorQueue::enqueue(const std::string &command, int priority, const std::string &jobId) {
@@ -110,8 +331,7 @@ namespace core {
             }
         }
 
-        // Always notify after enqueue to wake processing thread
-        queueCondition_.notify_one();
+        queueCondition_.notify_all();
     }
 
     void CommandExecutorQueue::enqueueFile(const std::string &filePath, int priority, const std::string &jobId) {
@@ -166,18 +386,26 @@ namespace core {
         auto &stateTracker = core::state::StateTracker::getInstance();
         stateTracker.resetForNewJob();
 
+        // Ensure processing is running
+        if (!running_) {
+            Logger::logWarning("[CommandExecutorQueue] Starting queue for file processing");
+            start();
+        }
+
         enqueueCommands(commands, priority, jobId);
 
-        // Force wake the processing thread after bulk enqueue
-        queueCondition_.notify_all();
+        // Aggressive wake-up
+        for (int i = 0; i < 10; ++i) {
+            queueCondition_.notify_all();
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+
+        Logger::logInfo("[CommandExecutorQueue] File enqueued successfully, processing active");
     }
 
     void CommandExecutorQueue::enqueueCommands(const std::vector<std::string> &commands, int priority,
                                                const std::string &jobId) {
-        if (commands.empty()) {
-            Logger::logWarning("[CommandExecutorQueue] Empty command vector ignored");
-            return;
-        }
+        if (commands.empty()) return;
 
         size_t enqueuedCount = 0;
         {
@@ -193,7 +421,7 @@ namespace core {
                     commandQueue_.push(cmd);
                     enqueuedCount++;
 
-                    // Page to disk if needed during bulk insert
+                    // Page periodically during bulk insert
                     if (commandQueue_.size() > MAX_COMMANDS_IN_RAM && enqueuedCount % 100 == 0) {
                         pageCommandsToDisk();
                     }
@@ -206,14 +434,12 @@ namespace core {
         Logger::logInfo("[CommandExecutorQueue] Enqueued " + std::to_string(enqueuedCount) +
                         " commands (priority=" + std::to_string(priority) + ", jobId=" + jobId + ")");
 
-        // Wake processing thread
+        // Wake processing
         queueCondition_.notify_all();
     }
 
     size_t CommandExecutorQueue::getQueueSize() const {
-        std::lock_guard<std::mutex> lock(queueMutex_);
-        std::lock_guard<std::mutex> diskLock(diskMutex_);
-        return commandQueue_.size() + pagingBuffer_.size() + diskQueue_.size();
+        return getTotalCommandsAvailable();
     }
 
     void CommandExecutorQueue::clearQueue() {
@@ -232,123 +458,6 @@ namespace core {
 
         if (clearedCount > 0) {
             Logger::logInfo("[CommandExecutorQueue] Cleared " + std::to_string(clearedCount) + " pending commands");
-        }
-    }
-
-    CommandExecutorQueue::Statistics CommandExecutorQueue::getStatistics() const {
-        std::lock_guard<std::mutex> lock(statsMutex_);
-        std::lock_guard<std::mutex> queueLock(queueMutex_);
-        std::lock_guard<std::mutex> diskLock(diskMutex_);
-
-        Statistics result = stats_;
-        result.currentQueueSize = commandQueue_.size() + pagingBuffer_.size() + diskQueue_.size();
-
-        return result;
-    }
-
-    void CommandExecutorQueue::processingLoop() {
-        Logger::logInfo("[CommandExecutorQueue] Processing loop started");
-
-        size_t executedCount = 0;
-        auto lastLogTime = std::chrono::steady_clock::now();
-        int emptyLoopCount = 0;
-
-        while (running_) {
-            PriorityCommand command;
-            bool hasCommand = false;
-
-            {
-                std::unique_lock<std::mutex> lock(queueMutex_);
-
-                // Load from other sources if main queue is empty
-                if (commandQueue_.empty()) {
-                    loadFromAllSources();
-                }
-
-                // Check if we have commands after loading
-                bool hasAnyCommands = !commandQueue_.empty();
-                if (!hasAnyCommands) {
-                    std::lock_guard<std::mutex> diskLock(diskMutex_);
-                    hasAnyCommands = !diskQueue_.empty() || !pagingBuffer_.empty();
-                }
-
-                // Only wait if we truly have no commands anywhere
-                if (!hasAnyCommands) {
-                    queueCondition_.wait_for(lock, std::chrono::milliseconds(100), [this] {
-                        return !commandQueue_.empty() || stopping_;
-                    });
-
-                    // Try loading again after wait
-                    if (commandQueue_.empty()) {
-                        loadFromAllSources();
-                    }
-                }
-
-                if (stopping_ && commandQueue_.empty()) {
-                    std::lock_guard<std::mutex> diskLock(diskMutex_);
-                    if (diskQueue_.empty() && pagingBuffer_.empty()) {
-                        Logger::logInfo("[CommandExecutorQueue] All queues empty, stopping");
-                        break;
-                    }
-                }
-
-                if (!commandQueue_.empty()) {
-                    command = commandQueue_.top();
-                    commandQueue_.pop();
-                    hasCommand = true;
-                    emptyLoopCount = 0;
-                } else {
-                    emptyLoopCount++;
-                    if (emptyLoopCount % 100 == 0) {
-                        Logger::logWarning("[CommandExecutorQueue] Queue empty for " +
-                                           std::to_string(emptyLoopCount) + " iterations");
-                    }
-                }
-            }
-
-            if (hasCommand) {
-                executeCommand(command);
-                executedCount++;
-
-                // Log progress
-                if (executedCount % 100 == 0) {
-                    auto now = std::chrono::steady_clock::now();
-                    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - lastLogTime).count();
-
-                    Logger::logInfo("[CommandExecutorQueue] Progress: " + std::to_string(executedCount) +
-                                    " executed, queue: " + std::to_string(getQueueSize()) +
-                                    ", rate: " + std::to_string(elapsed > 0 ? 100 / elapsed : 0) + " cmd/s");
-                    lastLogTime = now;
-                }
-            }
-        }
-
-        Logger::logInfo("[CommandExecutorQueue] Processing loop finished. Total executed: " +
-                        std::to_string(executedCount));
-    }
-
-    void CommandExecutorQueue::loadFromAllSources() {
-        // Load from paging buffer first
-        if (!pagingBuffer_.empty()) {
-            size_t loadCount = std::min(size_t(1000), pagingBuffer_.size());
-            for (size_t i = 0; i < loadCount && !pagingBuffer_.empty(); ++i) {
-                commandQueue_.push(pagingBuffer_.top());
-                pagingBuffer_.pop();
-            }
-            Logger::logInfo("[CommandExecutorQueue] Loaded " + std::to_string(loadCount) +
-                            " commands from paging buffer");
-        }
-
-        // Then load from disk if still empty
-        if (commandQueue_.empty() && !diskQueue_.empty()) {
-            std::lock_guard<std::mutex> diskLock(diskMutex_);
-            size_t loadCount = std::min(size_t(1000), diskQueue_.size());
-            for (size_t i = 0; i < loadCount && !diskQueue_.empty(); ++i) {
-                commandQueue_.push(diskQueue_.front());
-                diskQueue_.pop_front();
-            }
-            Logger::logInfo("[CommandExecutorQueue] Loaded " + std::to_string(loadCount) +
-                            " commands from disk");
         }
     }
 
@@ -380,30 +489,6 @@ namespace core {
             updateStats(false, true);
             Logger::logError("[CommandExecutorQueue] Execution error for '" + cmd.command +
                              "': " + std::string(e.what()));
-
-            static int consecutiveErrors = 0;
-            consecutiveErrors++;
-
-            if (consecutiveErrors > 5) {
-                Logger::logWarning("[CommandExecutorQueue] Multiple consecutive errors, pausing briefly");
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            } else if (consecutiveErrors > 20) {
-                Logger::logError("[CommandExecutorQueue] Too many errors, longer pause");
-                std::this_thread::sleep_for(std::chrono::seconds(1));
-                consecutiveErrors = 0;
-            }
-        }
-    }
-
-    void CommandExecutorQueue::updateStats(bool executed, bool error) {
-        std::lock_guard<std::mutex> lock(statsMutex_);
-
-        if (!executed && !error) {
-            stats_.totalEnqueued++;
-        } else if (executed) {
-            stats_.totalExecuted++;
-        } else if (error) {
-            stats_.totalErrors++;
         }
     }
 
@@ -440,6 +525,25 @@ namespace core {
             Logger::logInfo("[CommandExecutorQueue] Paging: moved " + std::to_string(movedToPagingBuffer) +
                             " to buffer, flushed " + std::to_string(flushedToDisk) + " to disk");
         }
+    }
+
+    void CommandExecutorQueue::updateStats(bool executed, bool error) {
+        std::lock_guard<std::mutex> lock(statsMutex_);
+
+        if (!executed && !error) {
+            stats_.totalEnqueued++;
+        } else if (executed) {
+            stats_.totalExecuted++;
+        } else if (error) {
+            stats_.totalErrors++;
+        }
+    }
+
+    CommandExecutorQueue::Statistics CommandExecutorQueue::getStatistics() const {
+        std::lock_guard<std::mutex> lock(statsMutex_);
+        Statistics result = stats_;
+        result.currentQueueSize = getTotalCommandsAvailable();
+        return result;
     }
 
     void CommandExecutorQueue::saveToDisk(const PriorityCommand &cmd) {

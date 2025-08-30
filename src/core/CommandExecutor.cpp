@@ -1,3 +1,4 @@
+// src/core/CommandExecutor.cpp
 #include "core/CommandExecutor.hpp"
 #include "core/types/Error.hpp"
 #include "logger/Logger.hpp"
@@ -17,12 +18,25 @@ namespace core {
         // Store command BEFORE sending for potential RESEND
         context_->storeCommand(commandNumber, command);
 
+        // Store as last sent command for health recovery
+        lastSentCommand_ = command;
+        lastSentNumber_ = commandNumber;
+
         // Send the command
         serial_->send(command);
         Logger::logInfo("[CommandExecutor] Sent N" + std::to_string(commandNumber) + ": " + command);
 
         // Process response with proper RESEND handling
         return processResponse(commandNumber);
+    }
+
+    void CommandExecutor::resendLastCommand() {
+        std::lock_guard<std::mutex> lock(serialMutex_);
+        if (!lastSentCommand_.empty()) {
+            Logger::logWarning("[CommandExecutor] Health recovery: resending N" +
+                               std::to_string(lastSentNumber_) + ": " + lastSentCommand_);
+            serial_->send(lastSentCommand_);
+        }
     }
 
     types::Result CommandExecutor::processResponse(uint16_t expectedNumber) {
@@ -62,10 +76,22 @@ namespace core {
 
                 // Handle OK
                 if (token == "OK") {
-                    iss >> token; // N<num>
-                    if (token[0] == 'N') {
-                        int ackNumber = std::stoi(token.substr(1));
+                    iss >> token; // N<num> or just number
+                    int ackNumber = -1;
 
+                    if (token[0] == 'N') {
+                        ackNumber = std::stoi(token.substr(1));
+                    } else {
+                        // Handle "OK 16" format (missing N)
+                        try {
+                            ackNumber = std::stoi(token);
+                            Logger::logWarning("[CommandExecutor] Received malformed OK without 'N': OK " + token);
+                        } catch (...) {
+                            Logger::logError("[CommandExecutor] Cannot parse OK response: " + response);
+                        }
+                    }
+
+                    if (ackNumber > 0) {
                         // Check if this completes a RESEND sequence
                         if (!resendQueue.empty() && ackNumber == resendQueue.front()) {
                             Logger::logInfo("[CommandExecutor] RESEND completed for N" + std::to_string(ackNumber));
@@ -85,6 +111,16 @@ namespace core {
                             resultAccumulated.code = types::ResultCode::Success;
                             resultAccumulated.message = "Command acknowledged";
                             return resultAccumulated;
+                        } else {
+                            Logger::logWarning("[CommandExecutor] ACK mismatch - Expected N" +
+                                               std::to_string(expectedNumber) + " but got " +
+                                               std::to_string(ackNumber));
+                            // Still accept it if it's the right number
+                            if (ackNumber == expectedNumber) {
+                                resultAccumulated.code = types::ResultCode::Success;
+                                resultAccumulated.message = "Command acknowledged (malformed)";
+                                return resultAccumulated;
+                            }
                         }
                     }
                 }
@@ -141,17 +177,29 @@ namespace core {
 
                     // Handle DUPLICATE
                 else if (token == "DUPLICATE") {
-                    iss >> token; // N<num>
-                    if (token[0] == 'N') {
-                        int dupNumber = std::stoi(token.substr(1));
-                        Logger::logWarning("[CommandExecutor] DUPLICATE for N" + std::to_string(dupNumber));
+                    iss >> token; // N<num> or just number
+                    int dupNumber = -1;
 
-                        if (dupNumber == expectedNumber) {
-                            // Our command was already processed, consider it successful
-                            resultAccumulated.code = types::ResultCode::Success;
-                            resultAccumulated.message = "Command already processed (DUPLICATE)";
-                            return resultAccumulated;
+                    if (token[0] == 'N') {
+                        dupNumber = std::stoi(token.substr(1));
+                    } else {
+                        // Handle malformed DUPLICATE
+                        try {
+                            dupNumber = std::stoi(token);
+                            Logger::logWarning("[CommandExecutor] Received malformed DUPLICATE without 'N': " + token);
+                        } catch (...) {
+                            // No number, assume it's for current command
+                            dupNumber = expectedNumber;
                         }
+                    }
+
+                    Logger::logInfo("[CommandExecutor] DUPLICATE for N" + std::to_string(dupNumber));
+
+                    if (dupNumber == expectedNumber || dupNumber == -1) {
+                        // Our command was already processed, consider it successful
+                        resultAccumulated.code = types::ResultCode::Success;
+                        resultAccumulated.message = "Command already processed (DUPLICATE)";
+                        return resultAccumulated;
                     }
                 }
 

@@ -38,10 +38,20 @@ namespace core {
          */
         types::Result sendCommandAndAwaitResponse(const std::string &command, uint16_t commandNumber);
 
+        /**
+         * @brief Resend the last command (for health recovery).
+         * Used by health monitor to break stalls.
+         */
+        void resendLastCommand();
+
     private:
         std::shared_ptr<SerialPort> serial_;
         std::shared_ptr<CommandContext> context_;
         std::mutex serialMutex_;
+
+        // Track last sent command for recovery
+        std::string lastSentCommand_;
+        uint16_t lastSentNumber_ = 0;
 
         /**
          * @brief Process responses for a specific command number.

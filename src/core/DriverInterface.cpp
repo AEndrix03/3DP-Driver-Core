@@ -11,8 +11,8 @@
 
 namespace core {
 
-    // Add static atomic for global command synchronization
-    static std::atomic<bool> g_commandInProgress{false};
+    // Global command synchronization: define variable with external linkage so other translation units can use it.
+    std::atomic<bool> g_commandInProgress{false};
     static std::mutex g_commandMutex;
     static std::condition_variable g_commandCV;
 
@@ -64,6 +64,12 @@ namespace core {
             return {types::ResultCode::Error, "Failed to send custom command."};
         }
         return {types::ResultCode::Success, "Custom command sent."};
+    }
+
+    void DriverInterface::resendLastCommand() const {
+        if (commandExecutor_) {
+            commandExecutor_->resendLastCommand();
+        }
     }
 
     PrintState DriverInterface::getState() const {
@@ -145,3 +151,4 @@ namespace core {
         return result;
     }
 } // namespace core
+
