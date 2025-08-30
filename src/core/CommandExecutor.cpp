@@ -1,9 +1,9 @@
-// src/core/CommandExecutor.cpp
 #include "core/CommandExecutor.hpp"
 #include "core/types/Error.hpp"
 #include "logger/Logger.hpp"
 #include <sstream>
 #include <chrono>
+#include <queue>
 
 namespace core {
 
@@ -11,153 +11,202 @@ namespace core {
             : serial_(std::move(serial)), context_(std::move(context)) {
     }
 
-    types::Result CommandExecutor::sendCommandAndAwaitResponse(const std::string &command, uint16_t expectedNumber) {
+    types::Result CommandExecutor::sendCommandAndAwaitResponse(const std::string &command, uint16_t commandNumber) {
         std::lock_guard<std::mutex> lock(serialMutex_);
 
         // Store command BEFORE sending for potential RESEND
-        context_->storeCommand(expectedNumber, command);
+        context_->storeCommand(commandNumber, command);
 
+        // Send the command
         serial_->send(command);
+        Logger::logInfo("[CommandExecutor] Sent N" + std::to_string(commandNumber) + ": " + command);
 
+        // Process response with proper RESEND handling
+        return processResponse(commandNumber);
+    }
+
+    types::Result CommandExecutor::processResponse(uint16_t expectedNumber) {
+        const int maxRetries = 5;
         int retries = 0;
-        const int maxRetries = 3;
-        const int baseTimeoutMs = 2000;
-
         types::Result resultAccumulated;
         resultAccumulated.code = types::ResultCode::Skip;
         resultAccumulated.commandNumber = expectedNumber;
 
-        while (retries <= maxRetries) {
+        // Queue for pending RESEND requests
+        std::queue<uint16_t> resendQueue;
+
+        while (retries < maxRetries) {
             auto startTime = std::chrono::steady_clock::now();
-            auto maxTimeout = std::chrono::milliseconds(baseTimeoutMs + retries * 1000);
+            auto timeout = std::chrono::milliseconds(5000);
 
-            while (true) {
-                if (std::chrono::steady_clock::now() - startTime > maxTimeout) {
-                    Logger::logWarning("[CommandExecutor] Timeout N" + std::to_string(expectedNumber) +
-                                       " (attempt " + std::to_string(retries + 1) + ")");
-                    break;
-                }
-
+            while (std::chrono::steady_clock::now() - startTime < timeout) {
                 std::string response = serial_->receiveLine();
-
-                if (response == "CONN_LOST" || response == "SERIAL_ERROR") {
-                    Logger::logError("[CommandExecutor] Serial connection issue for N" +
-                                     std::to_string(expectedNumber));
-                    return {types::ResultCode::Error, "Serial connection lost"};
-                }
 
                 if (response.empty() || response.find_first_not_of(" \t\r\n") == std::string::npos) {
                     continue;
                 }
 
-                // Store non-OK responses for debug
+                // Store non-control responses
                 if (response.find("OK") == std::string::npos &&
-                    response.find("BUSY") == std::string::npos &&
-                    response.find("RESEND") == std::string::npos) {
+                    response.find("RESEND") == std::string::npos &&
+                    response.find("ERR") == std::string::npos &&
+                    response.find("DUPLICATE") == std::string::npos &&
+                    response.find("BUSY") == std::string::npos) {
                     resultAccumulated.body.push_back(response);
                 }
 
-                types::Result result = parseResponse(response, expectedNumber);
+                // Parse response
+                std::istringstream iss(response);
+                std::string token;
+                iss >> token;
 
-                if (result.isSuccess()) {
-                    resultAccumulated.code = types::ResultCode::Success;
-                    resultAccumulated.message = result.message;
+                // Handle OK
+                if (token == "OK") {
+                    iss >> token; // N<num>
+                    if (token[0] == 'N') {
+                        int ackNumber = std::stoi(token.substr(1));
+
+                        // Check if this completes a RESEND sequence
+                        if (!resendQueue.empty() && ackNumber == resendQueue.front()) {
+                            Logger::logInfo("[CommandExecutor] RESEND completed for N" + std::to_string(ackNumber));
+                            resendQueue.pop();
+
+                            // If there are more RESENDs pending, handle them
+                            if (!resendQueue.empty()) {
+                                uint16_t nextResend = resendQueue.front();
+                                if (handleResend(nextResend)) {
+                                    continue; // Process next response
+                                }
+                            }
+                        }
+
+                        // Check if this is our expected command
+                        if (ackNumber == expectedNumber) {
+                            resultAccumulated.code = types::ResultCode::Success;
+                            resultAccumulated.message = "Command acknowledged";
+                            return resultAccumulated;
+                        }
+                    }
+                }
+
+                    // Handle RESEND
+                else if (token == "RESEND") {
+                    iss >> token; // FAILED or N<num>
+
+                    if (token == "FAILED") {
+                        iss >> token; // N<num>
+                        if (token[0] == 'N') {
+                            int failedNumber = std::stoi(token.substr(1));
+                            Logger::logError("[CommandExecutor] RESEND FAILED for N" + std::to_string(failedNumber));
+
+                            // Critical: firmware lost history, cannot recover this command
+                            // Must continue from next command
+                            resultAccumulated.code = types::ResultCode::Success;
+                            resultAccumulated.message =
+                                    "RESEND FAILED - continuing from N" + std::to_string(failedNumber);
+                            return resultAccumulated;
+                        }
+                    } else if (token[0] == 'N') {
+                        int resendNumber = std::stoi(token.substr(1));
+                        Logger::logWarning("[CommandExecutor] RESEND requested for N" + std::to_string(resendNumber));
+
+                        // Add to resend queue if not already there
+                        bool alreadyQueued = false;
+                        std::queue<uint16_t> tempQueue = resendQueue;
+                        while (!tempQueue.empty()) {
+                            if (tempQueue.front() == resendNumber) {
+                                alreadyQueued = true;
+                                break;
+                            }
+                            tempQueue.pop();
+                        }
+
+                        if (!alreadyQueued) {
+                            resendQueue.push(resendNumber);
+                        }
+
+                        // Immediately handle the resend
+                        if (handleResend(resendNumber)) {
+                            continue; // Wait for response to resent command
+                        } else {
+                            Logger::logError("[CommandExecutor] Cannot RESEND N" + std::to_string(resendNumber) +
+                                             " - not in history");
+                            // Send dummy OK to continue
+                            resultAccumulated.code = types::ResultCode::Success;
+                            resultAccumulated.message = "RESEND failed - command not in history";
+                            return resultAccumulated;
+                        }
+                    }
+                }
+
+                    // Handle DUPLICATE
+                else if (token == "DUPLICATE") {
+                    iss >> token; // N<num>
+                    if (token[0] == 'N') {
+                        int dupNumber = std::stoi(token.substr(1));
+                        Logger::logWarning("[CommandExecutor] DUPLICATE for N" + std::to_string(dupNumber));
+
+                        if (dupNumber == expectedNumber) {
+                            // Our command was already processed, consider it successful
+                            resultAccumulated.code = types::ResultCode::Success;
+                            resultAccumulated.message = "Command already processed (DUPLICATE)";
+                            return resultAccumulated;
+                        }
+                    }
+                }
+
+                    // Handle ERROR
+                else if (token == "ERR") {
+                    Logger::logError("[CommandExecutor] ERROR response: " + response);
+                    resultAccumulated.code = types::ResultCode::Error;
+                    resultAccumulated.message = response;
                     return resultAccumulated;
                 }
 
-                if (result.isSkip()) {
+                    // Handle BUSY
+                else if (token == "BUSY") {
+                    //Logger::logInfo("[CommandExecutor] Printer BUSY, waiting...");
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    startTime = std::chrono::steady_clock::now(); // Reset timeout
                     continue;
-                }
-
-                if (result.isBusy()) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50 * (retries + 1)));
-                    startTime = std::chrono::steady_clock::now();
-                    continue;
-                }
-
-                if (result.isError()) {
-                    // Check if it's a RESEND FAILED error
-                    if (result.message.find("RESEND FAILED") != std::string::npos) {
-                        Logger::logError("[CommandExecutor] RESEND FAILED - firmware lost command history");
-                        // Continue execution instead of blocking
-                        return {types::ResultCode::Success, "RESEND FAILED - continuing"};
-                    }
-                    Logger::logWarning("[CommandExecutor] Error response: " + result.message);
-                    break;
                 }
             }
 
+            // Timeout reached
             retries++;
-            if (retries <= maxRetries) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100 * retries));
-                Logger::logWarning("[CommandExecutor] Retry " + std::to_string(retries) +
-                                   "/" + std::to_string(maxRetries) + " for N" + std::to_string(expectedNumber));
-                serial_->send(command);
+            Logger::logWarning("[CommandExecutor] Timeout for N" + std::to_string(expectedNumber) +
+                               " (attempt " + std::to_string(retries) + "/" + std::to_string(maxRetries) + ")");
+
+            if (retries < maxRetries) {
+                // Resend the current command
+                std::string resendCommand = context_->getCommandText(expectedNumber);
+                if (!resendCommand.empty()) {
+                    Logger::logInfo("[CommandExecutor] Retrying N" + std::to_string(expectedNumber));
+                    serial_->send(resendCommand);
+                } else {
+                    Logger::logError("[CommandExecutor] Cannot retry - command not in history");
+                    break;
+                }
             }
         }
 
         Logger::logError("[CommandExecutor] Max retries exceeded for N" + std::to_string(expectedNumber));
-        return {types::ResultCode::Error, "Max retries exceeded"};
+        resultAccumulated.code = types::ResultCode::Error;
+        resultAccumulated.message = "Max retries exceeded";
+        return resultAccumulated;
     }
 
-    types::Result CommandExecutor::parseResponse(const std::string &response, uint16_t expectedNumber) {
-        std::istringstream iss(response);
-        std::string token;
-        iss >> token;
+    bool CommandExecutor::handleResend(uint16_t commandNumber) {
+        std::string resendCommand = context_->getCommandText(commandNumber);
 
-        if (token == "OK" || token == "DUPLICATE") {
-            iss >> token; // N<num>
-            if (token[0] == 'N') {
-                int receivedNumber = std::stoi(token.substr(1));
-                if (receivedNumber != expectedNumber) {
-                    Logger::logWarning("[CommandExecutor] ACK mismatch - Expected N" +
-                                       std::to_string(expectedNumber) + " but got N" +
-                                       std::to_string(receivedNumber));
-                    // Don't fail, just warn
-                }
-            }
-            return {types::ResultCode::Success, "Command acknowledged."};
+        if (resendCommand.empty()) {
+            Logger::logError("[CommandExecutor] Cannot RESEND N" + std::to_string(commandNumber) + " - not in history");
+            return false;
         }
 
-        if (token == "BUSY") {
-            return {types::ResultCode::Busy, "Busy Serial: Command is processing."};
-        }
-
-        if (token == "RESEND") {
-            iss >> token; // N<num> or FAILED
-
-            if (token == "FAILED") {
-                // Handle "RESEND FAILED N###"
-                iss >> token; // N<num>
-                if (token[0] == 'N') {
-                    int failedNumber = std::stoi(token.substr(1));
-                    Logger::logError("[CommandExecutor] RESEND FAILED for N" + std::to_string(failedNumber));
-                    return {types::ResultCode::Error, "RESEND FAILED N" + std::to_string(failedNumber)};
-                }
-            } else if (token[0] == 'N') {
-                int requestedNumber = std::stoi(token.substr(1));
-                std::string resendCommand = context_->getCommandText(requestedNumber);
-
-                if (resendCommand.empty()) {
-                    Logger::logError("[CommandExecutor] Cannot RESEND N" + std::to_string(requestedNumber) +
-                                     " - not in history");
-                    // Send a dummy OK to continue
-                    return {types::ResultCode::Success, "RESEND failed but continuing"};
-                }
-
-                Logger::logWarning("[RESEND] Resending command N" + std::to_string(requestedNumber));
-                serial_->send(resendCommand);
-
-                // Wait for response to the resent command
-                return sendCommandAndAwaitResponse(resendCommand, requestedNumber);
-            }
-        }
-
-        if (token == "ERR") {
-            return {types::ResultCode::Error, response};
-        }
-
-        return {types::ResultCode::Skip, "Response message. Skipping results..."};
+        Logger::logInfo("[CommandExecutor] Resending N" + std::to_string(commandNumber) + ": " + resendCommand);
+        serial_->send(resendCommand);
+        return true;
     }
 
 } // namespace core

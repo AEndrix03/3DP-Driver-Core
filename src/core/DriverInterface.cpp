@@ -6,8 +6,16 @@
 #include "core/CommandBuilder.hpp"
 #include "core/printer/ErrorRecovery.hpp"
 #include "logger/Logger.hpp"
+#include <queue>
+#include <atomic>
 
 namespace core {
+
+    // Add static atomic for global command synchronization
+    static std::atomic<bool> g_commandInProgress{false};
+    static std::mutex g_commandMutex;
+    static std::condition_variable g_commandCV;
+
     DriverInterface::DriverInterface(std::shared_ptr<Printer> printer, std::shared_ptr<SerialPort> serialPort)
             : printer_(std::move(printer)),
               serialPort_(std::move(serialPort)),
@@ -53,9 +61,9 @@ namespace core {
 
     types::Result DriverInterface::sendCustomCommand(const std::string &rawCommand) const {
         if (!printer_->sendCommand(rawCommand)) {
-            return {types::ResultCode::Error, "Failed to send custom printer-command."};
+            return {types::ResultCode::Error, "Failed to send custom command."};
         }
-        return {types::ResultCode::Success, "Custom printer-command sent."};
+        return {types::ResultCode::Success, "Custom command sent."};
     }
 
     PrintState DriverInterface::getState() const {
@@ -90,31 +98,50 @@ namespace core {
 
     types::Result
     DriverInterface::sendCommandInternal(char category, int code, const std::vector<std::string> &params) const {
-        static recovery::ResilientExecutor<void> executor(
-                recovery::createPrinterRetryConfig<void>(),
-                recovery::createPrinterCircuitConfig()
-        );
+        // CRITICAL: Wait if another command is in progress
+        {
+            std::unique_lock<std::mutex> lock(g_commandMutex);
+            g_commandCV.wait(lock, []() { return !g_commandInProgress.load(); });
+            g_commandInProgress = true;
+        }
 
-        return executor.execute([&]() {
-            uint16_t cmdNum = commandContext_->nextCommandNumber();
-            std::string command = CommandBuilder::buildCommand(cmdNum, category, code, params);
-
-            // Update state based on command
-            if (category == 'S') {
-                if (code == 1) { // Start print
-                    const_cast<DriverInterface *>(this)->setState(PrintState::Printing);
-                } else if (code == 2) { // Pause
-                    const_cast<DriverInterface *>(this)->setState(PrintState::Paused);
-                } else if (code == 3) { // Resume
-                    const_cast<DriverInterface *>(this)->setState(PrintState::Printing);
-                } else if (code == 0) { // Homing
-                    const_cast<DriverInterface *>(this)->setState(PrintState::Homing);
-                }
-            } else if (category == 'M' && code == 0) { // Emergency stop
-                const_cast<DriverInterface *>(this)->setState(PrintState::Error);
+        // Ensure we release the lock on exit
+        struct CommandGuard {
+            ~CommandGuard() {
+                g_commandInProgress = false;
+                g_commandCV.notify_all();
             }
+        } guard;
 
-            return commandExecutor_->sendCommandAndAwaitResponse(command, cmdNum);
-        });
+        // Get the next command number
+        uint16_t cmdNum = commandContext_->nextCommandNumber();
+        std::string command = CommandBuilder::buildCommand(cmdNum, category, code, params);
+
+        // Update state based on command
+        if (category == 'S') {
+            if (code == 1) { // Start print
+                const_cast<DriverInterface *>(this)->setState(PrintState::Printing);
+            } else if (code == 2) { // Pause
+                const_cast<DriverInterface *>(this)->setState(PrintState::Paused);
+            } else if (code == 3) { // Resume
+                const_cast<DriverInterface *>(this)->setState(PrintState::Printing);
+            } else if (code == 0) { // Homing
+                const_cast<DriverInterface *>(this)->setState(PrintState::Homing);
+            }
+        } else if (category == 'M' && code == 0) { // Emergency stop
+            const_cast<DriverInterface *>(this)->setState(PrintState::Error);
+        }
+
+        // Send and wait for response
+        types::Result result = commandExecutor_->sendCommandAndAwaitResponse(command, cmdNum);
+
+        // If command failed with RESEND FAILED, we need to handle it
+        if (result.message.find("RESEND FAILED") != std::string::npos) {
+            Logger::logWarning("[DriverInterface] RESEND FAILED detected, continuing execution");
+            // Don't treat as error, continue
+            result.code = types::ResultCode::Success;
+        }
+
+        return result;
     }
 } // namespace core

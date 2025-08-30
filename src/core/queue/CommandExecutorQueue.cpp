@@ -265,12 +265,23 @@ namespace core {
                     loadFromAllSources();
                 }
 
-                // Wait for commands or stop signal
-                if (commandQueue_.empty()) {
-                    // Use wait instead of wait_for for better response
-                    queueCondition_.wait(lock, [this] {
+                // Check if we have commands after loading
+                bool hasAnyCommands = !commandQueue_.empty();
+                if (!hasAnyCommands) {
+                    std::lock_guard<std::mutex> diskLock(diskMutex_);
+                    hasAnyCommands = !diskQueue_.empty() || !pagingBuffer_.empty();
+                }
+
+                // Only wait if we truly have no commands anywhere
+                if (!hasAnyCommands) {
+                    queueCondition_.wait_for(lock, std::chrono::milliseconds(100), [this] {
                         return !commandQueue_.empty() || stopping_;
                     });
+
+                    // Try loading again after wait
+                    if (commandQueue_.empty()) {
+                        loadFromAllSources();
+                    }
                 }
 
                 if (stopping_ && commandQueue_.empty()) {
