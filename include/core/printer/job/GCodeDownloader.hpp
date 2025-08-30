@@ -18,8 +18,7 @@ namespace core::print {
         size_t totalBytes = 0;
         size_t downloadedBytes = 0;
         double percentage = 0.0;
-        bool completed = false;
-        std::string error;
+        std::string status = "Initializing...";
     };
 
     class GCodeDownloader {
@@ -41,6 +40,10 @@ namespace core::print {
         bool isDownloading() const { return downloading_; }
 
         DownloadProgress getCurrentProgress() const;
+
+        void downloadWorkerWithRetry(const std::string &url, const std::string &jobId);
+
+        bool performSingleDownload(const std::string &url, const std::string &jobId);
 
     private:
         std::atomic<bool> downloading_{false};
