@@ -72,6 +72,8 @@ namespace core::print {
         updateState(JobState::HEATING);
         // Temperature commands already sent via G-code
 
+        driver_->system()->startPrint();
+
         // Assicurati che la coda sia attiva prima di marcare il job come RUNNING
         updateState(JobState::RUNNING);
         Logger::logInfo("[PrintJobManager] Print job started: " + jobId + " (" + std::to_string(lineCount) + " lines)");
