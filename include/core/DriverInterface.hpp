@@ -44,6 +44,10 @@ namespace core {
 
         PrintState getState() const;
 
+        void setState(PrintState newState);
+
+        std::string printStateToString(PrintState state) const;
+
         types::Result sendCommandInternal(char category, int code, const std::vector<std::string> &params) const;
 
     private:
@@ -51,7 +55,7 @@ namespace core {
         std::shared_ptr<SerialPort> serialPort_;
         std::shared_ptr<CommandContext> commandContext_;
         std::shared_ptr<CommandExecutor> commandExecutor_;
-        PrintState currentState_;
+        mutable PrintState currentState_;  // Made mutable for state changes
 
         std::shared_ptr<command::motion::MotionCommands> motion_;
         std::shared_ptr<command::endstop::EndstopCommands> endstop_;

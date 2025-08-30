@@ -1,4 +1,5 @@
 #include "core/printer/job/PrintJobManager.hpp"
+#include "core/printer/job/tracking/JobTracker.hpp"
 #include "logger/Logger.hpp"
 #include <cmath>
 #include <fstream>
@@ -16,8 +17,6 @@ namespace core::print {
     }
 
     bool PrintJobManager::startPrintJobInternal(const std::string &gcodePath, const std::string &jobId) {
-        // Nota: questo metodo assume che il lock sia già acquisito dal chiamante
-
         if (currentState_ == JobState::RUNNING) {
             Logger::logError("[PrintJobManager] Cannot start - job already active: " + currentJobId_);
             return false;
@@ -30,6 +29,12 @@ namespace core::print {
             return false;
         }
 
+        // Send system start command
+        driver_->system()->startPrint();
+
+        // Update driver state
+        driver_->setState(PrintState::Printing);
+
         // Load file
         updateState(JobState::LOADING);
 
@@ -38,6 +43,7 @@ namespace core::print {
         if (!file.is_open()) {
             Logger::logError("[PrintJobManager] Cannot open G-code file: " + gcodePath);
             updateState(JobState::FAILED);
+            driver_->setState(PrintState::Error);
             return false;
         }
 
@@ -50,34 +56,31 @@ namespace core::print {
         }
         file.close();
 
-        // Initialize job
+        // Initialize job in tracker
+        auto &jobTracker = jobs::JobTracker::getInstance();
+        jobTracker.startJob(jobId, lineCount);
+
+        // Initialize job manager state
         currentJobId_ = jobId;
         currentFilePath_ = gcodePath;
         totalLines_ = lineCount;
         executedLines_ = 0;
         startTime_ = std::chrono::steady_clock::now();
 
-        // Assicurati che la coda di esecuzione sia avviata PRIMA di mettere in coda i comandi:
-        // se si enqueuano comandi quando il thread non è ancora partito, la notify può essere persa.
+        // Ensure command queue is running
         if (commandQueue_ && !commandQueue_->isRunning()) {
-            Logger::logInfo("[PrintJobManager] Starting command executor queue before enqueuing file");
+            Logger::logInfo("[PrintJobManager] Starting command executor queue");
             commandQueue_->start();
         }
 
         // Queue the entire G-code file
         Logger::logInfo("[PrintJobManager] Enqueuing G-code file with " + std::to_string(lineCount) + " commands");
-        commandQueue_->enqueueFile(gcodePath, 3, jobId); // Priority 3 for print jobs
+        commandQueue_->enqueueFile(gcodePath, 3, jobId);
 
-        // Start heating if needed
-        updateState(JobState::HEATING);
-        // Temperature commands already sent via G-code
-
-        driver_->system()->startPrint();
-
-        // Assicurati che la coda sia attiva prima di marcare il job come RUNNING
+        // Update states
         updateState(JobState::RUNNING);
-        Logger::logInfo("[PrintJobManager] Print job started: " + jobId + " (" + std::to_string(lineCount) + " lines)");
 
+        Logger::logInfo("[PrintJobManager] Print job started: " + jobId + " (" + std::to_string(lineCount) + " lines)");
         return true;
     }
 
@@ -87,9 +90,11 @@ namespace core::print {
             Logger::logError("[PrintJobManager] Cannot start download - job already active: " + currentJobId_);
             return false;
         }
+
         if (!downloader_) {
             downloader_ = std::make_unique<GCodeDownloader>();
         }
+
         currentJobId_ = jobId;
         updateState(JobState::LOADING);
 
@@ -100,6 +105,7 @@ namespace core::print {
                     onDownloadCompleted(success, filePath, error);
                 }
         );
+
         Logger::logInfo("[PrintJobManager] Started G-code download for job: " + jobId);
         return true;
     }
@@ -113,7 +119,13 @@ namespace core::print {
 
         try {
             driver_->system()->pause();
+            driver_->setState(PrintState::Paused);
             updateState(JobState::PAUSED);
+
+            // Update job tracker
+            auto &jobTracker = jobs::JobTracker::getInstance();
+            jobTracker.pauseJob(currentJobId_);
+
             Logger::logInfo("[PrintJobManager] Job paused: " + currentJobId_);
             return true;
         } catch (const std::exception &e) {
@@ -131,7 +143,13 @@ namespace core::print {
 
         try {
             driver_->system()->resume();
+            driver_->setState(PrintState::Printing);
             updateState(JobState::RUNNING);
+
+            // Update job tracker
+            auto &jobTracker = jobs::JobTracker::getInstance();
+            jobTracker.resumeJob(currentJobId_);
+
             Logger::logInfo("[PrintJobManager] Job resumed: " + currentJobId_);
             return true;
         } catch (const std::exception &e) {
@@ -142,9 +160,9 @@ namespace core::print {
 
     bool PrintJobManager::cancelJob() {
         std::lock_guard<std::mutex> lock(stateMutex_);
-        // Il job è cancellabile se si trova in uno degli stati: RUNNING, PRECHECK, LOADING, HOMING
-        if (!(currentState_ == JobState::RUNNING || currentState_ == JobState::PRECHECK ||
-              currentState_ == JobState::LOADING || currentState_ == JobState::HOMING)) {
+
+        if (!(currentState_ == JobState::RUNNING || currentState_ == JobState::PAUSED ||
+              currentState_ == JobState::LOADING || currentState_ == JobState::PRECHECK)) {
             Logger::logWarning("[PrintJobManager] No job to cancel");
             return false;
         }
@@ -159,16 +177,23 @@ namespace core::print {
             commandQueue_->clearQueue();
         }
 
+        // Update job tracker
+        auto &jobTracker = jobs::JobTracker::getInstance();
+        jobTracker.cancelJob(currentJobId_);
+
         // Emergency stop
         try {
             driver_->motion()->emergencyStop();
+            driver_->setState(PrintState::Idle);
             updateState(JobState::CANCELLED);
+
             Logger::logInfo("[PrintJobManager] Job cancelled: " + currentJobId_);
             resetJob();
             return true;
         } catch (const std::exception &e) {
             Logger::logError("[PrintJobManager] Cancel failed: " + std::string(e.what()));
             updateState(JobState::FAILED);
+            driver_->setState(PrintState::Error);
             return false;
         }
     }
@@ -179,31 +204,12 @@ namespace core::print {
     }
 
     bool PrintJobManager::isReadyToPrint() const {
-        // Check homing
-        /*if (!checkHoming()) {
-            Logger::logError("[PrintJobManager] Printer not homed");
-            return false;
-        }
-
-        // Check endstops
-        if (!checkEndstops()) {
-            Logger::logError("[PrintJobManager] Endstop error");
-            return false;
-        }
-
-        // Check temperatures
-        if (!checkTemperatures()) {
-            Logger::logError("[PrintJobManager] Temperature check failed");
-            return false;
-        }
-*/
-        // Check system ready
+        // Basic safety check - removed strict requirements
         PrintState driverState = driver_->getState();
         if (driverState == PrintState::Error) {
             Logger::logError("[PrintJobManager] Driver in error state");
             return false;
         }
-
         return true;
     }
 
@@ -216,14 +222,20 @@ namespace core::print {
         progress.linesExecuted = executedLines_;
         progress.totalLines = totalLines_;
 
-        if (totalLines_ > 0) {
+        // Get progress from job tracker for accurate count
+        auto &jobTracker = jobs::JobTracker::getInstance();
+        auto jobInfo = jobTracker.getJobInfo(currentJobId_);
+        if (jobInfo.has_value()) {
+            progress.linesExecuted = jobInfo->executedCommands;
+            progress.percentComplete = jobInfo->getProgress();
+        } else if (totalLines_ > 0) {
             progress.percentComplete = (float(executedLines_) / totalLines_) * 100.0f;
         }
 
         auto now = std::chrono::steady_clock::now();
         progress.elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - startTime_);
 
-        if (executedLines_ > 0 && progress.percentComplete > 0) {
+        if (progress.percentComplete > 0) {
             auto totalTime = progress.elapsed.count() / (progress.percentComplete / 100.0f);
             progress.estimated = std::chrono::seconds(static_cast<long>(totalTime));
         }
@@ -241,11 +253,16 @@ namespace core::print {
         if (currentState_ != newState) {
             JobState oldState = currentState_;
             currentState_ = newState;
+
             Logger::logInfo(
                     "[PrintJobManager] State change: " + stateToString(oldState) + " -> " + stateToString(newState));
 
-            if (newState == JobState::FAILED || newState == JobState::COMPLETED) {
-                // Eventuali notifiche Kafka qui
+            // Update job tracker state
+            auto &jobTracker = jobs::JobTracker::getInstance();
+            if (newState == JobState::FAILED) {
+                jobTracker.failJob(currentJobId_, "Job failed");
+            } else if (newState == JobState::COMPLETED) {
+                jobTracker.completeJob(currentJobId_);
             }
         }
     }
@@ -286,22 +303,8 @@ namespace core::print {
     }
 
     bool PrintJobManager::checkTemperatures() const {
-        try {
-            // Check if hotend and bed are at reasonable temperatures
-            // This is a basic safety check - temperatures should be managed by G-code
-            auto hotendResult = driver_->temperature()->getHotendTemperature();
-            auto bedResult = driver_->temperature()->getBedTemperature();
-
-            if (!hotendResult.isSuccess() || !bedResult.isSuccess()) {
-                Logger::logWarning("[PrintJobManager] Could not read temperatures");
-                return true; // Don't fail if we can't read temperatures
-            }
-
-            return true; // Temperature management handled by G-code
-        } catch (const std::exception &e) {
-            Logger::logError("[PrintJobManager] Temperature check failed: " + std::string(e.what()));
-            return false;
-        }
+        // Temperature checks disabled - managed by G-code
+        return true;
     }
 
     void PrintJobManager::resetJob() {
@@ -314,18 +317,24 @@ namespace core::print {
 
     std::string PrintJobManager::stateToString(JobState state) const {
         switch (state) {
+            case JobState::CREATED:
+                return "Created";
+            case JobState::QUEUED:
+                return "Queued";
             case JobState::LOADING:
                 return "Loading";
             case JobState::PRECHECK:
                 return "PreCheck";
             case JobState::HEATING:
                 return "Heating";
+            case JobState::HOMING:
+                return "Homing";
             case JobState::RUNNING:
                 return "Running";
             case JobState::PAUSED:
                 return "Paused";
             case JobState::COMPLETED:
-                return "Finishing";
+                return "Completed";
             case JobState::FAILED:
                 return "Failed";
             case JobState::CANCELLED:
@@ -346,13 +355,13 @@ namespace core::print {
         if (!success) {
             Logger::logError("[PrintJobManager] Download failed: " + error);
             updateState(JobState::FAILED);
+            driver_->setState(PrintState::Error);
             resetJob();
             return;
         }
 
         Logger::logInfo("[PrintJobManager] Download completed, starting print job with: " + filePath);
 
-        // Usa la versione interna che non prende il lock
         if (startPrintJobInternal(filePath, currentJobId_)) {
             Logger::logInfo("[PrintJobManager] Print job started successfully from downloaded G-code");
         } else {
