@@ -5,6 +5,15 @@
 #include <string>
 #include <memory>
 
+#ifdef _WIN32
+
+#include <windows.h>
+
+#else
+#include <sys/ioctl.h>
+#include <termios.h>
+#endif
+
 namespace core {
 
 /**
@@ -28,6 +37,22 @@ namespace core {
         std::string buffer_;
 
         void configurePort(uint32_t baudrate);
+
+        /**
+         * @brief Triggers device reset via DTR signal manipulation (generic serial device)
+         */
+        void triggerDeviceReset();
+
+        /**
+         * @brief Returns number of bytes available to read on the serial port (platform-specific)
+         */
+        uint32_t getAvailableBytes();
+
+        /**
+         * @brief Clears the serial buffer
+         */
+        void clearBuffer();
     };
 
 } // namespace core
+
