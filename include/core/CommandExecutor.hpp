@@ -10,6 +10,7 @@
 #include <memory>
 #include <string>
 #include <mutex>
+#include <cstdint>
 
 namespace core {
 
@@ -52,6 +53,7 @@ namespace core {
         // Track last sent command for recovery
         std::string lastSentCommand_;
         uint16_t lastSentNumber_ = 0;
+        bool firmwareSyncLost_ = false;
 
         /**
          * @brief Process responses for a specific command number.
@@ -67,6 +69,59 @@ namespace core {
          * @return true if command was found and resent, false otherwise.
          */
         bool handleResend(uint16_t commandNumber);
+
+        /**
+         * @brief Comprehensive recovery strategy for RESEND FAILED
+         * @param failedCommandNumber Command that triggered RESEND FAILED
+         * @return true if recovery successful, false otherwise
+         */
+        bool attemptResendFailedRecovery(uint16_t failedCommandNumber);
+
+        /**
+         * @brief Identify which command the firmware expects
+         * @param failedNumber Command number that failed
+         * @return Command number firmware likely expects
+         */
+        uint16_t identifyExpectedCommand(uint16_t failedNumber);
+
+        /**
+         * @brief Send the specific command firmware expects
+         * @param commandNumber Command to send
+         * @return true if command was sent, false if not found
+         */
+        bool sendExpectedCommand(uint16_t commandNumber);
+
+        /**
+         * @brief Reset line numbering using M110
+         * @param fromNumber Starting number for reset
+         * @return true if reset command sent
+         */
+        bool attemptLineNumberReset(uint16_t fromNumber);
+
+        /**
+         * @brief Full firmware reset as last resort
+         * @return true if reset attempted
+         */
+        bool attemptFullReset();
+
+        /**
+         * @brief Wait for confirmation that recovery worked
+         * @return true if firmware responds positively
+         */
+        bool waitForRecoveryConfirmation();
+
+        /**
+         * @brief Compute XOR checksum for command
+         * @param data Command data for checksum calculation
+         * @return Checksum value
+         */
+        uint8_t computeChecksum(const std::string &data);
+
+        /**
+         * @brief Proactive firmware sync check and recovery
+         * @return true if firmware is responsive
+         */
+        bool attemptFirmwareResync();
     };
 
 } // namespace core
