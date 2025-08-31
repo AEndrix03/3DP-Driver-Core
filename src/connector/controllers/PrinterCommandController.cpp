@@ -2,22 +2,20 @@
 // Created by Andrea on 23/08/2025.
 //
 
+// src/connector/controllers/PrinterCommandController.cpp - FIXED
 #include "connector/controllers/PrinterCommandController.hpp"
 #include "connector/models/printer-command/PrinterCommandRequest.hpp"
 #include "logger/Logger.hpp"
 #include <stdexcept>
 #include <nlohmann/json.hpp>
-#include <thread>
-#include <queue>
-#include <mutex>
-#include <condition_variable>
+#include <utility>
 
 namespace connector::controllers {
-    PrinterCommandController::PrinterCommandController(const kafka::KafkaConfig &config,
+    PrinterCommandController::PrinterCommandController(kafka::KafkaConfig config,
                                                        std::shared_ptr<core::DriverInterface> driver,
                                                        std::shared_ptr<core::CommandExecutorQueue> commandQueue)
-            : config_(config), driver_(driver), commandQueue_(commandQueue), running_(false),
-              messageProcessingRunning_(true) {
+            : config_(std::move(config)), driver_(std::move(driver)), commandQueue_(std::move(commandQueue)),
+              running_(false) {
         if (!driver_) {
             throw std::invalid_argument("DriverInterface cannot be null");
         }
@@ -28,25 +26,17 @@ namespace connector::controllers {
         Logger::logInfo("[PrinterCommandController] Initializing for driver: " + config_.driverId);
 
         try {
-            // Create Kafka components
-            Logger::logInfo("[PrinterCommandController] Creating Kafka components...");
-
             receiver_ = std::make_shared<events::printer_command::PrinterCommandReceiver>(config_);
             sender_ = std::make_shared<events::printer_command::PrinterCommandSender>(config_);
             processor_ = std::make_shared<processors::printer_command::PrinterCommandProcessor>(
                     sender_, commandQueue_, config_.driverId);
 
-            // Create message processing thread
-            messageProcessingThread_ = std::thread([this]() {
-                messageProcessingLoop();
-            });
-
-            // Register message callback
+            // FIXED: Simplified message processing - NO SEPARATE THREAD
             receiver_->setMessageCallback([this](const std::string &message, const std::string &key) {
                 onMessageReceived(message, key);
             });
 
-            Logger::logInfo("[PrinterCommandController] Created successfully for driver: " + config_.driverId);
+            Logger::logInfo("[PrinterCommandController] Created successfully");
         } catch (const std::exception &e) {
             Logger::logError("[PrinterCommandController] Failed to initialize: " + std::string(e.what()));
             receiver_.reset();
@@ -57,17 +47,7 @@ namespace connector::controllers {
 
     PrinterCommandController::~PrinterCommandController() {
         stop();
-
-        // Stop message processing thread
-        {
-            std::lock_guard<std::mutex> lock(messageQueueMutex_);
-            messageProcessingRunning_ = false;
-        }
-        messageQueueCondition_.notify_all();
-
-        if (messageProcessingThread_.joinable()) {
-            messageProcessingThread_.join();
-        }
+        // REMOVED: No separate thread to manage
     }
 
     void PrinterCommandController::start() {
@@ -117,70 +97,39 @@ namespace connector::controllers {
         return stats_;
     }
 
+    // FIXED: Direct processing without separate thread
     void PrinterCommandController::onMessageReceived(const std::string &message, const std::string &key) {
         stats_.messagesReceived++;
 
         Logger::logInfo("[PrinterCommandController] Received message, key: " + key +
                         ", size: " + std::to_string(message.size()));
 
-        // Queue message for asynchronous processing instead of processing directly
-        {
-            std::lock_guard<std::mutex> lock(messageQueueMutex_);
-            messageQueue_.emplace(message, key);
-        }
-        messageQueueCondition_.notify_one();
-
-        Logger::logInfo("[PrinterCommandController] Message queued for processing");
+        // FIXED: Process immediately instead of queuing to separate thread
+        processMessage(message, key);
     }
 
-    void PrinterCommandController::messageProcessingLoop() {
-        Logger::logInfo("[PrinterCommandController] Message processing thread started");
-
-        while (messageProcessingRunning_) {
-            std::unique_lock<std::mutex> lock(messageQueueMutex_);
-            messageQueueCondition_.wait(lock, [this] {
-                Logger::logInfo("[PrinterCommandController] Message Queue Condition acquired");
-                return !messageQueue_.empty() || !messageProcessingRunning_;
-            });
-
-            while (!messageQueue_.empty() && messageProcessingRunning_) {
-                auto messagePair = messageQueue_.front();
-                messageQueue_.pop();
-                lock.unlock();
-
-                // Process message (this was the original onMessageReceived logic)
-                processMessage(messagePair.first, messagePair.second);
-
-                lock.lock();
-            }
-        }
-
-        Logger::logInfo("[PrinterCommandController] Message processing thread stopped");
-    }
+    // REMOVED: messageProcessingLoop() - No longer needed
 
     void PrinterCommandController::processMessage(const std::string &message, const std::string &key) {
         try {
-            // Parse the JSON message
             nlohmann::json json = nlohmann::json::parse(message);
             Logger::logInfo("[PrinterCommandController] Parsed JSON: " + json.dump());
 
             models::printer_command::PrinterCommandRequest request(json);
 
-            // Validate request
             if (!request.isValid()) {
                 Logger::logError("[PrinterCommandController] Invalid request - missing required fields");
                 stats_.processingErrors++;
                 return;
             }
 
-            // Log request details
             Logger::logInfo("[PrinterCommandController] Request details:");
             Logger::logInfo("  RequestId: " + request.requestId);
             Logger::logInfo("  DriverId: " + request.driverId);
             Logger::logInfo("  Command: " + request.command);
             Logger::logInfo("  Priority: " + std::to_string(request.priority));
 
-            // Check if this request is for our driver
+            // Check if request is for this driver
             if (request.driverId != config_.driverId) {
                 Logger::logInfo("[PrinterCommandController] Request not for this driver (" +
                                 request.driverId + " vs " + config_.driverId + "), ignoring");
@@ -192,8 +141,8 @@ namespace connector::controllers {
             if (processor_) {
                 processor_->dispatch(request);
                 stats_.messagesProcessed++;
-                stats_.messagesSent++;  // Response will be sent by processor
-                Logger::logInfo("[PrinterCommandController] Command dispatched to processor");
+                stats_.messagesSent++;
+                Logger::logInfo("[PrinterCommandController] Command dispatched successfully");
             } else {
                 Logger::logError("[PrinterCommandController] Processor not available!");
                 stats_.processingErrors++;

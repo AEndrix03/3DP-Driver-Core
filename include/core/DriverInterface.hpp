@@ -17,6 +17,7 @@
 #include "core/command/temperature/TemperatureCommands.hpp"
 #include <memory>
 #include <vector>
+#include <mutex>  // ADDED
 
 namespace core {
     /**
@@ -42,10 +43,6 @@ namespace core {
 
         types::Result sendCustomCommand(const std::string &rawCommand) const;
 
-        /**
-         * @brief Resend the last command for health recovery.
-         * Used to break stalls by triggering DUPLICATE response.
-         */
         void resendLastCommand() const;
 
         PrintState getState() const;
@@ -61,7 +58,9 @@ namespace core {
         std::shared_ptr<SerialPort> serialPort_;
         std::shared_ptr<CommandContext> commandContext_;
         std::shared_ptr<CommandExecutor> commandExecutor_;
-        mutable PrintState currentState_;  // Made mutable for state changes
+        mutable PrintState currentState_;
+
+        mutable std::mutex commandMutex_;
 
         std::shared_ptr<command::motion::MotionCommands> motion_;
         std::shared_ptr<command::endstop::EndstopCommands> endstop_;

@@ -11,16 +11,12 @@
 #include "core/DriverInterface.hpp"
 #include "core/queue/CommandExecutorQueue.hpp"
 #include <memory>
-#include <thread>
-#include <queue>
-#include <mutex>
-#include <condition_variable>
 #include <atomic>
 
 namespace connector::controllers {
     class PrinterCommandController {
     public:
-        PrinterCommandController(const kafka::KafkaConfig &config,
+        PrinterCommandController(kafka::KafkaConfig config,
                                  std::shared_ptr<core::DriverInterface> driver,
                                  std::shared_ptr<core::CommandExecutorQueue> commandQueue);
 
@@ -53,17 +49,16 @@ namespace connector::controllers {
         mutable Statistics stats_;
         bool running_;
 
-        // Async message processing
-        std::thread messageProcessingThread_;
-        std::queue<std::pair<std::string, std::string>> messageQueue_;
-        std::mutex messageQueueMutex_;
-        std::condition_variable messageQueueCondition_;
-        std::atomic<bool> messageProcessingRunning_{true};
-
         void onMessageReceived(const std::string &message, const std::string &key);
 
-        void messageProcessingLoop();
-
         void processMessage(const std::string &message, const std::string &key);
+
+        // REMOVED: All threading-related members that caused deadlocks
+        // - messageProcessingThread_
+        // - messageQueue_
+        // - messageQueueMutex_
+        // - messageQueueCondition_
+        // - messageProcessingRunning_
+        // - messageProcessingLoop()
     };
 } // namespace connector::controllers

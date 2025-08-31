@@ -41,8 +41,6 @@ namespace core {
 
         void stop();
 
-        bool isRunning() const;
-
         void enqueue(const std::string &command, int priority = 5, const std::string &jobId = "");
 
         void enqueueFile(const std::string &filePath, int priority = 5, const std::string &jobId = "");
