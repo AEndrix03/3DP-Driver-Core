@@ -37,6 +37,10 @@ namespace core {
 
         ~CommandExecutorQueue();
 
+        bool isRunning() const {
+            return running_.load() && !stopping_.load();
+        }
+
         void start();
 
         void stop();
