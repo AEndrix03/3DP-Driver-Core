@@ -344,8 +344,11 @@ void ApplicationController::initializeCommandExecutorQueue() {
 
     commandQueue_ = std::make_shared<core::CommandExecutorQueue>(translator_);
 
-    // Start the queue - CRITICAL: Queue must always be running
+    // Start the queue immediately
     commandQueue_->start();
+
+    // Wait a moment for initialization
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
     // Verify it's running
     if (!commandQueue_->isRunning()) {
@@ -355,7 +358,7 @@ void ApplicationController::initializeCommandExecutorQueue() {
 
     Logger::logInfo("[ApplicationController] Command Executor Queue initialized:");
     Logger::logInfo("[ApplicationController]   Status: RUNNING");
-    Logger::logInfo("[ApplicationController]   Max Queue Size: 1000");
+    Logger::logInfo("[ApplicationController]   Max Queue Size: 10000");
     Logger::logInfo("[ApplicationController]   Processing Delay: 10ms");
     Logger::logInfo("[ApplicationController]   Auto-restart: ENABLED");
 }
@@ -381,7 +384,6 @@ bool ApplicationController::verifyCommandQueueStatus() {
 
     Logger::logInfo("[ApplicationController] Command Queue verification passed");
     Logger::logInfo("[ApplicationController]   Queue Status: ACTIVE");
-    Logger::logInfo("[ApplicationController]   Queue Size: " + std::to_string(commandQueue_->getQueueSize()));
 
     // Test the queue with a simple command
     Logger::logInfo("[ApplicationController] Testing queue with M115 (firmware info)...");

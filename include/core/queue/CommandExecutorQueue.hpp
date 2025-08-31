@@ -64,6 +64,20 @@ namespace core {
 
         Statistics getStatistics() const;
 
+        /**
+           * @brief Get queue condition variable for external notification
+           * Used to wake up the processing thread from external sources
+           */
+        std::condition_variable &getQueueCondition() { return queueCondition_; }
+
+        /**
+         * @brief Force wake up the processing thread
+         * Call this after enqueuing commands to ensure immediate processing
+         */
+        void wakeUp() {
+            queueCondition_.notify_all();
+        }
+
     private:
         std::shared_ptr<translator::gcode::GCodeTranslator> translator_;
         std::priority_queue<PriorityCommand> commandQueue_;      // 10k commands in RAM
@@ -108,5 +122,6 @@ namespace core {
         void pageCommandsToDisk();
 
         void executeCommand(const PriorityCommand &cmd);
+
     };
 } // namespace core

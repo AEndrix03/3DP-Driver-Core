@@ -1,4 +1,3 @@
-// src/core/CommandExecutor.cpp
 #include "core/CommandExecutor.hpp"
 #include "core/types/Error.hpp"
 #include "logger/Logger.hpp"
@@ -36,11 +35,18 @@ namespace core {
             Logger::logWarning("[CommandExecutor] Health recovery: resending N" +
                                std::to_string(lastSentNumber_) + ": " + lastSentCommand_);
             serial_->send(lastSentCommand_);
+
+            // Clear any stuck state
+            lastSentCommand_.clear();
+            lastSentNumber_ = 0;
         }
     }
 
     types::Result CommandExecutor::processResponse(uint16_t expectedNumber) {
-        const int maxRetries = 5;
+        const int maxRetries = 3;  // Reduced from 5
+        const auto commandTimeout = std::chrono::milliseconds(10000);  // 10 seconds per command
+        const auto responseTimeout = std::chrono::milliseconds(500);   // 500ms between responses
+
         int retries = 0;
         types::Result resultAccumulated;
         resultAccumulated.code = types::ResultCode::Skip;
@@ -49,14 +55,26 @@ namespace core {
         // Queue for pending RESEND requests
         std::queue<uint16_t> resendQueue;
 
-        while (retries < maxRetries) {
-            auto startTime = std::chrono::steady_clock::now();
-            auto timeout = std::chrono::milliseconds(5000);
+        auto commandStartTime = std::chrono::steady_clock::now();
 
-            while (std::chrono::steady_clock::now() - startTime < timeout) {
+        while (retries < maxRetries) {
+            auto loopStartTime = std::chrono::steady_clock::now();
+
+            // Check overall command timeout
+            if (std::chrono::steady_clock::now() - commandStartTime > commandTimeout) {
+                Logger::logError("[CommandExecutor] Command timeout for N" + std::to_string(expectedNumber));
+                resultAccumulated.code = types::ResultCode::Timeout;
+                resultAccumulated.message = "Command timeout after 10 seconds";
+                return resultAccumulated;
+            }
+
+            // Inner loop with shorter timeout for individual responses
+            while (std::chrono::steady_clock::now() - loopStartTime < responseTimeout) {
                 std::string response = serial_->receiveLine();
 
                 if (response.empty() || response.find_first_not_of(" \t\r\n") == std::string::npos) {
+                    // Brief sleep to prevent busy waiting
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
                     continue;
                 }
 
@@ -79,9 +97,13 @@ namespace core {
                     iss >> token; // N<num> or just number
                     int ackNumber = -1;
 
-                    if (token[0] == 'N') {
-                        ackNumber = std::stoi(token.substr(1));
-                    } else {
+                    if (!token.empty() && token[0] == 'N') {
+                        try {
+                            ackNumber = std::stoi(token.substr(1));
+                        } catch (...) {
+                            Logger::logWarning("[CommandExecutor] Cannot parse OK N number: " + token);
+                        }
+                    } else if (!token.empty()) {
                         // Handle "OK 16" format (missing N)
                         try {
                             ackNumber = std::stoi(token);
@@ -91,37 +113,17 @@ namespace core {
                         }
                     }
 
-                    if (ackNumber > 0) {
-                        // Check if this completes a RESEND sequence
-                        if (!resendQueue.empty() && ackNumber == resendQueue.front()) {
-                            Logger::logInfo("[CommandExecutor] RESEND completed for N" + std::to_string(ackNumber));
-                            resendQueue.pop();
+                    // Accept OK even without number for simple commands
+                    if (ackNumber == expectedNumber || ackNumber == -1) {
+                        resultAccumulated.code = types::ResultCode::Success;
+                        resultAccumulated.message = "Command acknowledged";
+                        return resultAccumulated;
+                    }
 
-                            // If there are more RESENDs pending, handle them
-                            if (!resendQueue.empty()) {
-                                uint16_t nextResend = resendQueue.front();
-                                if (handleResend(nextResend)) {
-                                    continue; // Process next response
-                                }
-                            }
-                        }
-
-                        // Check if this is our expected command
-                        if (ackNumber == expectedNumber) {
-                            resultAccumulated.code = types::ResultCode::Success;
-                            resultAccumulated.message = "Command acknowledged";
-                            return resultAccumulated;
-                        } else {
-                            Logger::logWarning("[CommandExecutor] ACK mismatch - Expected N" +
-                                               std::to_string(expectedNumber) + " but got " +
-                                               std::to_string(ackNumber));
-                            // Still accept it if it's the right number
-                            if (ackNumber == expectedNumber) {
-                                resultAccumulated.code = types::ResultCode::Success;
-                                resultAccumulated.message = "Command acknowledged (malformed)";
-                                return resultAccumulated;
-                            }
-                        }
+                    // Check if this completes a RESEND sequence
+                    if (ackNumber > 0 && !resendQueue.empty() && ackNumber == resendQueue.front()) {
+                        Logger::logInfo("[CommandExecutor] RESEND completed for N" + std::to_string(ackNumber));
+                        resendQueue.pop();
                     }
                 }
 
@@ -131,43 +133,26 @@ namespace core {
 
                     if (token == "FAILED") {
                         iss >> token; // N<num>
-                        if (token[0] == 'N') {
+                        if (!token.empty() && token[0] == 'N') {
                             int failedNumber = std::stoi(token.substr(1));
                             Logger::logError("[CommandExecutor] RESEND FAILED for N" + std::to_string(failedNumber));
 
                             // Critical: firmware lost history, cannot recover this command
-                            // Must continue from next command
                             resultAccumulated.code = types::ResultCode::Success;
-                            resultAccumulated.message =
-                                    "RESEND FAILED - continuing from N" + std::to_string(failedNumber);
+                            resultAccumulated.message = "RESEND FAILED - continuing";
                             return resultAccumulated;
                         }
-                    } else if (token[0] == 'N') {
+                    } else if (!token.empty() && token[0] == 'N') {
                         int resendNumber = std::stoi(token.substr(1));
                         Logger::logWarning("[CommandExecutor] RESEND requested for N" + std::to_string(resendNumber));
 
-                        // Add to resend queue if not already there
-                        bool alreadyQueued = false;
-                        std::queue<uint16_t> tempQueue = resendQueue;
-                        while (!tempQueue.empty()) {
-                            if (tempQueue.front() == resendNumber) {
-                                alreadyQueued = true;
-                                break;
-                            }
-                            tempQueue.pop();
-                        }
-
-                        if (!alreadyQueued) {
-                            resendQueue.push(resendNumber);
-                        }
-
                         // Immediately handle the resend
                         if (handleResend(resendNumber)) {
-                            continue; // Wait for response to resent command
+                            loopStartTime = std::chrono::steady_clock::now(); // Reset timeout
+                            continue;
                         } else {
-                            Logger::logError("[CommandExecutor] Cannot RESEND N" + std::to_string(resendNumber) +
-                                             " - not in history");
-                            // Send dummy OK to continue
+                            Logger::logError("[CommandExecutor] Cannot RESEND N" + std::to_string(resendNumber));
+                            // Continue anyway
                             resultAccumulated.code = types::ResultCode::Success;
                             resultAccumulated.message = "RESEND failed - command not in history";
                             return resultAccumulated;
@@ -177,34 +162,14 @@ namespace core {
 
                     // Handle DUPLICATE
                 else if (token == "DUPLICATE") {
-                    iss >> token; // N<num> or just number
-                    int dupNumber = -1;
-
-                    if (token[0] == 'N') {
-                        dupNumber = std::stoi(token.substr(1));
-                    } else {
-                        // Handle malformed DUPLICATE
-                        try {
-                            dupNumber = std::stoi(token);
-                            Logger::logWarning("[CommandExecutor] Received malformed DUPLICATE without 'N': " + token);
-                        } catch (...) {
-                            // No number, assume it's for current command
-                            dupNumber = expectedNumber;
-                        }
-                    }
-
-                    Logger::logInfo("[CommandExecutor] DUPLICATE for N" + std::to_string(dupNumber));
-
-                    if (dupNumber == expectedNumber || dupNumber == -1) {
-                        // Our command was already processed, consider it successful
-                        resultAccumulated.code = types::ResultCode::Success;
-                        resultAccumulated.message = "Command already processed (DUPLICATE)";
-                        return resultAccumulated;
-                    }
+                    Logger::logInfo("[CommandExecutor] DUPLICATE response received");
+                    resultAccumulated.code = types::ResultCode::Success;
+                    resultAccumulated.message = "Command already processed (DUPLICATE)";
+                    return resultAccumulated;
                 }
 
                     // Handle ERROR
-                else if (token == "ERR") {
+                else if (token == "ERR" || token == "ERROR") {
                     Logger::logError("[CommandExecutor] ERROR response: " + response);
                     resultAccumulated.code = types::ResultCode::Error;
                     resultAccumulated.message = response;
@@ -213,19 +178,30 @@ namespace core {
 
                     // Handle BUSY
                 else if (token == "BUSY") {
-                    //Logger::logInfo("[CommandExecutor] Printer BUSY, waiting...");
+                    Logger::logInfo("[CommandExecutor] Printer BUSY, waiting...");
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                    startTime = std::chrono::steady_clock::now(); // Reset timeout
+                    loopStartTime = std::chrono::steady_clock::now(); // Reset timeout
                     continue;
                 }
             }
 
-            // Timeout reached
+            // Response timeout reached for this retry
             retries++;
-            Logger::logWarning("[CommandExecutor] Timeout for N" + std::to_string(expectedNumber) +
+            Logger::logWarning("[CommandExecutor] Response timeout for N" + std::to_string(expectedNumber) +
                                " (attempt " + std::to_string(retries) + "/" + std::to_string(maxRetries) + ")");
 
             if (retries < maxRetries) {
+                // For simple queries, accept timeout as success
+                if (expectedNumber > 0 &&
+                    context_->getCommandText(expectedNumber).find("M114") != std::string::npos) {
+                    // Position query - if we got body data, consider it success
+                    if (!resultAccumulated.body.empty()) {
+                        resultAccumulated.code = types::ResultCode::Success;
+                        resultAccumulated.message = "Query completed with partial response";
+                        return resultAccumulated;
+                    }
+                }
+
                 // Resend the current command
                 std::string resendCommand = context_->getCommandText(expectedNumber);
                 if (!resendCommand.empty()) {
@@ -239,7 +215,7 @@ namespace core {
         }
 
         Logger::logError("[CommandExecutor] Max retries exceeded for N" + std::to_string(expectedNumber));
-        resultAccumulated.code = types::ResultCode::Error;
+        resultAccumulated.code = types::ResultCode::Timeout;
         resultAccumulated.message = "Max retries exceeded";
         return resultAccumulated;
     }

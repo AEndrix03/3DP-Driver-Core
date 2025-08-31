@@ -130,10 +130,11 @@ namespace core {
     }
 
     void CommandExecutorQueue::processingLoop() {
-        Logger::logInfo("[CommandExecutorQueue] Processing loop started - always ready to execute commands");
+        Logger::logInfo("[CommandExecutorQueue] Processing loop started - ALWAYS ACTIVE");
 
         size_t executedCount = 0;
         size_t executedSinceReload = 0;
+        size_t consecutiveErrors = 0;
         auto lastLogTime = std::chrono::steady_clock::now();
 
         while (running_) {
@@ -143,57 +144,44 @@ namespace core {
             {
                 std::unique_lock<std::mutex> lock(queueMutex_);
 
-                // Progressive reload logic - ogni 1% (100 comandi) eseguiti
+                // Progressive reload logic
                 if (executedSinceReload >= RELOAD_THRESHOLD) {
                     loadFromAllSources();
                     executedSinceReload = 0;
                 }
 
-                // Se la coda è quasi vuota (meno del 10%), forza il ricaricamento
+                // Force reload if queue is low
                 if (commandQueue_.size() < RELOAD_BATCH_SIZE && getTotalCommandsAvailable() > 0) {
-                    Logger::logInfo("[CommandExecutorQueue] Queue getting low (" +
+                    Logger::logInfo("[CommandExecutorQueue] Queue low (" +
                                     std::to_string(commandQueue_.size()) + "), reloading...");
                     loadFromAllSources();
                 }
 
-                // Se completamente vuota ma ci sono comandi disponibili, ricarica aggressivamente
+                // Aggressive reload if completely empty
                 if (commandQueue_.empty()) {
                     size_t totalAvailable = getTotalCommandsAvailable();
                     if (totalAvailable > 0) {
                         Logger::logWarning("[CommandExecutorQueue] Queue empty but " +
-                                           std::to_string(totalAvailable) + " commands available, forcing reload");
-                        loadFromAllSources();
+                                           std::to_string(totalAvailable) + " commands available");
+                        forceLoadFromDisk();
 
-                        // Se ancora vuota dopo il caricamento, c'è un problema
+                        // If still empty, there's a problem
                         if (commandQueue_.empty()) {
-                            Logger::logError("[CommandExecutorQueue] Failed to load from sources!");
-                            // Forza un reload più aggressivo
-                            forceLoadFromDisk();
+                            Logger::logError("[CommandExecutorQueue] Failed to load commands!");
+                            // Don't get stuck, continue checking
+                            queueCondition_.wait_for(lock, std::chrono::milliseconds(100));
+                            continue;
                         }
                     }
                 }
 
-                // Attendi solo se veramente non ci sono comandi
+                // Wait only if truly no commands
                 if (commandQueue_.empty()) {
-                    size_t totalAvailable = getTotalCommandsAvailable();
-                    if (totalAvailable == 0) {
-                        // Veramente nessun comando, attendi
-                        queueCondition_.wait_for(lock, std::chrono::milliseconds(100));
-                    } else {
-                        // Ci sono comandi ma non riusciamo a caricarli, breve pausa e riprova
-                        queueCondition_.wait_for(lock, std::chrono::milliseconds(10));
-                    }
+                    queueCondition_.wait_for(lock, std::chrono::milliseconds(100));
+                    continue; // Check again
                 }
 
-                // Check for stop condition ONLY if really stopping and empty
-                if (stopping_ && commandQueue_.empty()) {
-                    std::lock_guard<std::mutex> diskLock(diskMutex_);
-                    if (diskQueue_.empty() && pagingBuffer_.empty()) {
-                        break;
-                    }
-                }
-
-                // Get next command - ALWAYS if available
+                // Get next command
                 if (!commandQueue_.empty()) {
                     command = commandQueue_.top();
                     commandQueue_.pop();
@@ -203,20 +191,34 @@ namespace core {
                     // Update health tracking
                     lastExecutionTime_ = std::chrono::steady_clock::now();
                     executionStalled_ = false;
+                    consecutiveErrors = 0; // Reset error counter
 
                     // Log high priority commands
                     if (command.priority < 3) {
-                        Logger::logInfo("[CommandExecutorQueue] Executing high priority command (p=" +
-                                        std::to_string(command.priority) + "): " + command.command);
+                        Logger::logInfo("[CommandExecutorQueue] High priority command dequeued");
                     }
                 }
             }
 
             if (hasCommand) {
-                executeCommand(command);
-                executedCount++;
+                // Execute with error recovery
+                try {
+                    executeCommand(command);
+                    executedCount++;
+                } catch (const std::exception &e) {
+                    consecutiveErrors++;
+                    Logger::logError("[CommandExecutorQueue] Command execution exception: " +
+                                     std::string(e.what()));
 
-                // Progress logging ogni 100 comandi
+                    // If too many consecutive errors, pause briefly
+                    if (consecutiveErrors > 5) {
+                        Logger::logError("[CommandExecutorQueue] Too many errors, pausing 1s");
+                        std::this_thread::sleep_for(std::chrono::seconds(1));
+                        consecutiveErrors = 0;
+                    }
+                }
+
+                // Progress logging
                 if (executedCount % 100 == 0) {
                     auto now = std::chrono::steady_clock::now();
                     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - lastLogTime).count();
@@ -230,12 +232,12 @@ namespace core {
 
                     Logger::logInfo("[CommandExecutorQueue] Progress: " + std::to_string(executedCount) +
                                     " executed, RAM=" + std::to_string(queueSize) +
-                                    ", Total remaining=" + std::to_string(totalRemaining) +
+                                    ", Remaining=" + std::to_string(totalRemaining) +
                                     ", Rate=" + std::to_string(elapsed > 0 ? 100 / elapsed : 0) + " cmd/s");
                     lastLogTime = now;
                 }
             } else {
-                // No command available - brief pause but stay ready
+                // No command - very brief pause
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
         }
@@ -636,15 +638,17 @@ namespace core {
         auto &tracker = jobs::JobTracker::getInstance();
         tracker.updateJobProgress(cmd.jobId, cmd.command);
 
-        // Always log high priority commands and periodically log others
+        // Always log critical commands and periodically log others
         static size_t logCounter = 0;
-        bool shouldLog = (cmd.priority <= 2) || (++logCounter % 1000 == 0);
+        bool shouldLog = (cmd.priority <= 2) || (++logCounter % 100 == 0);
 
-        // ALWAYS log M24 (start print) and other critical commands
-        if (cmd.command.find("M24") != std::string::npos ||
-            cmd.command.find("M25") != std::string::npos ||
-            cmd.command.find("M112") != std::string::npos ||
-            cmd.command.find("G28") != std::string::npos) {
+        // ALWAYS log critical commands
+        if (cmd.command.find("M24") != std::string::npos ||  // Start print
+            cmd.command.find("M25") != std::string::npos ||  // Pause
+            cmd.command.find("M112") != std::string::npos || // Emergency stop
+            cmd.command.find("G28") != std::string::npos ||  // Homing
+            cmd.command.find("M104") != std::string::npos || // Set hotend temp
+            cmd.command.find("M140") != std::string::npos) { // Set bed temp
             shouldLog = true;
         }
 
@@ -656,29 +660,91 @@ namespace core {
         }
 
         try {
-            // Log before parsing for debugging
-            Logger::logInfo("[CommandExecutorQueue] Sending to translator: " + cmd.command);
-
-            translator_->parseLine(cmd.command);
-            updateStats(true, false);
-
-            if (shouldLog) {
-                Logger::logInfo("[CommandExecutorQueue] Command executed successfully: " + cmd.command);
+            // Check if the command is a comment or empty
+            if (cmd.command.empty() || cmd.command[0] == ';' || cmd.command[0] == '%') {
+                // Skip comments and empty lines
+                updateStats(true, false);
+                return;
             }
 
-        } catch (const GCodeTranslatorInvalidCommandException &e) {
-            updateStats(false, true);
-            Logger::logWarning("[CommandExecutorQueue] Invalid G-code: " + cmd.command +
-                               " - Error: " + std::string(e.what()));
+            // Log before parsing for debugging
+            if (shouldLog) {
+                Logger::logInfo("[CommandExecutorQueue] Sending to translator: " + cmd.command);
+            }
 
-        } catch (const GCodeTranslatorUnknownCommandException &e) {
-            updateStats(false, true);
-            Logger::logWarning("[CommandExecutorQueue] Unknown G-code: " + cmd.command +
-                               " - Error: " + std::string(e.what()));
+            // Set a timeout for command execution
+            auto startTime = std::chrono::steady_clock::now();
+            const auto COMMAND_TIMEOUT = std::chrono::seconds(20);
+
+            // Execute in a separate thread with timeout
+            std::atomic<bool> commandComplete{false};
+            std::atomic<bool> commandSuccess{false};
+            std::string errorMessage;
+
+            std::thread commandThread([this, &cmd, &commandComplete, &commandSuccess, &errorMessage]() {
+                try {
+                    translator_->parseLine(cmd.command);
+                    commandSuccess = true;
+                } catch (const GCodeTranslatorInvalidCommandException &e) {
+                    errorMessage = "Invalid G-code: " + std::string(e.what());
+                    commandSuccess = false;
+                } catch (const GCodeTranslatorUnknownCommandException &e) {
+                    errorMessage = "Unknown G-code: " + std::string(e.what());
+                    commandSuccess = false;
+                } catch (const std::exception &e) {
+                    errorMessage = "Execution error: " + std::string(e.what());
+                    commandSuccess = false;
+                }
+                commandComplete = true;
+            });
+
+            // Wait for command with timeout
+            bool timedOut = false;
+            while (!commandComplete && !timedOut) {
+                auto elapsed = std::chrono::steady_clock::now() - startTime;
+                if (elapsed > COMMAND_TIMEOUT) {
+                    timedOut = true;
+                    Logger::logError("[CommandExecutorQueue] Command timeout after 20s: " + cmd.command);
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+
+            // Detach thread if it's still running (timeout case)
+            if (timedOut && commandThread.joinable()) {
+                commandThread.detach();
+
+                // Force clear any stuck command lock in driver
+                if (translator_ && translator_->getDriver()) {
+                    translator_->getDriver()->resendLastCommand();
+                }
+
+                updateStats(false, true);
+                Logger::logError("[CommandExecutorQueue] Command abandoned due to timeout: " + cmd.command);
+
+                // Continue processing other commands
+                return;
+            }
+
+            // Join thread if it completed
+            if (commandThread.joinable()) {
+                commandThread.join();
+            }
+
+            // Handle result
+            if (commandSuccess) {
+                updateStats(true, false);
+                if (shouldLog) {
+                    Logger::logInfo("[CommandExecutorQueue] Command executed successfully: " + cmd.command);
+                }
+            } else {
+                updateStats(false, true);
+                Logger::logWarning("[CommandExecutorQueue] Command failed: " + cmd.command +
+                                   " - Error: " + errorMessage);
+            }
 
         } catch (const std::exception &e) {
             updateStats(false, true);
-            Logger::logError("[CommandExecutorQueue] Execution error for '" + cmd.command +
+            Logger::logError("[CommandExecutorQueue] Unexpected error for '" + cmd.command +
                              "': " + std::string(e.what()));
         }
     }

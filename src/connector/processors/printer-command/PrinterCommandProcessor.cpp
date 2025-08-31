@@ -2,7 +2,6 @@
 #include "connector/events/printer-command/PrinterCommandSender.hpp"
 #include "connector/models/printer-command/PrinterCommandRequest.hpp"
 #include "connector/models/printer-command/PrinterCommandResponse.hpp"
-
 #include "logger/Logger.hpp"
 #include <nlohmann/json.hpp>
 
@@ -16,6 +15,7 @@ namespace connector::processors::printer_command {
 
     void PrinterCommandProcessor::dispatch(const connector::models::printer_command::PrinterCommandRequest &request) {
         Logger::logInfo("[PrinterCommandProcessor] Processing command request id: " + request.requestId);
+
         try {
             // Validate the request
             if (!request.isValid()) {
@@ -28,24 +28,55 @@ namespace connector::processors::printer_command {
             if (!commandQueue_->isRunning()) {
                 Logger::logInfo("[PrinterCommandProcessor] Starting command executor queue");
                 commandQueue_->start();
+
+                // Wait a moment for queue to initialize
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
 
             // Split command by ';' separator
             std::vector<std::string> commands = splitCommands(request.command);
-            Logger::logInfo(
-                    "[PrinterCommandProcessor] Queueing " + std::to_string(commands.size()) +
-                    " command(s) with priority: "
-                    + std::to_string(request.priority));
-            // Enqueue all commands with same priority and requestId
-            commandQueue_->enqueueCommands(commands, request.priority, request.requestId);
+            Logger::logInfo("[PrinterCommandProcessor] Queueing " + std::to_string(commands.size()) +
+                            " command(s) with priority: " + std::to_string(request.priority));
 
-            // Send immediate acknowledgment that commands were queued
+            // IMPORTANT: Use empty string for jobId - these are individual commands, not jobs!
+            // Only PrintJobManager should create jobs
+            std::string jobId = ""; // NO JOB for individual commands
+
+            // Log the actual commands being queued
+            for (size_t i = 0; i < commands.size() && i < 5; ++i) {
+                Logger::logInfo("[PrinterCommandProcessor]   Command[" + std::to_string(i) + "]: " + commands[i]);
+            }
+            if (commands.size() > 5) {
+                Logger::logInfo("[PrinterCommandProcessor]   ... and " + std::to_string(commands.size() - 5) + " more");
+            }
+
+            // Enqueue all commands with priority but NO jobId
+            commandQueue_->enqueueCommands(commands, request.priority, jobId);
+
+            // Force wake up the queue multiple times
+            for (int i = 0; i < 5; ++i) {
+                commandQueue_->wakeUp();
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+
+            // Send immediate acknowledgment
             connector::models::printer_command::PrinterCommandResponse response(
-                    driverId_, request.requestId, true, "",
-                    "Commands queued for execution (" + std::to_string(commands.size()) + " commands)");
+                    driverId_,
+                    request.requestId,
+                    true,
+                    "",
+                    "Commands queued for execution (" + std::to_string(commands.size()) + " commands)"
+            );
 
             sendResponse(response);
-            Logger::logInfo("[PrinterCommandProcessor] Commands queued successfully: " + request.requestId);
+            Logger::logInfo("[PrinterCommandProcessor] Commands queued successfully for request: " + request.requestId);
+
+            // Double-check queue is processing
+            if (commandQueue_->getQueueSize() > 0 && commandQueue_->isRunning()) {
+                Logger::logInfo("[PrinterCommandProcessor] Queue confirmed active with " +
+                                std::to_string(commandQueue_->getQueueSize()) + " pending commands");
+            }
+
         } catch (const std::exception &e) {
             Logger::logError("[PrinterCommandProcessor] Unexpected error: " + std::string(e.what()));
             sendErrorResponse(request.requestId, "UnexpectedException", e.what());
@@ -64,16 +95,18 @@ namespace connector::processors::printer_command {
             std::string responseMessage = responseJson.dump();
 
             if (sender_->sendMessage(responseMessage, driverId_)) {
-                Logger::logInfo("[PrinterCommandProcessor] Command response sent successfully");
+                Logger::logInfo("[PrinterCommandProcessor] Response sent for request: " +
+                                responseJson["requestId"].get<std::string>());
             } else {
-                Logger::logError("[PrinterCommandProcessor] Failed to send command response");
+                Logger::logError("[PrinterCommandProcessor] Failed to send response");
             }
         } catch (const std::exception &e) {
             Logger::logError("[PrinterCommandProcessor] Failed to send response: " + std::string(e.what()));
         }
     }
 
-    void PrinterCommandProcessor::sendErrorResponse(const std::string &requestId, const std::string &exception,
+    void PrinterCommandProcessor::sendErrorResponse(const std::string &requestId,
+                                                    const std::string &exception,
                                                     const std::string &message) {
         connector::models::printer_command::PrinterCommandResponse errorResponse(
                 driverId_, requestId, false, exception, message);
@@ -84,7 +117,8 @@ namespace connector::processors::printer_command {
         std::vector<std::string> commands;
         size_t start = 0;
         size_t pos = 0;
-        // Simple split like Java String.split(";")
+
+        // Split by semicolon
         while ((pos = command.find(';', start)) != std::string::npos) {
             std::string segment = command.substr(start, pos - start);
             // Trim whitespace
@@ -92,7 +126,9 @@ namespace connector::processors::printer_command {
             if (first != std::string::npos) {
                 size_t last = segment.find_last_not_of(" \t\r\n");
                 segment = segment.substr(first, last - first + 1);
-                commands.push_back(segment);
+                if (!segment.empty()) {
+                    commands.push_back(segment);
+                }
             }
             start = pos + 1;
         }
@@ -104,10 +140,17 @@ namespace connector::processors::printer_command {
             if (first != std::string::npos) {
                 size_t last = segment.find_last_not_of(" \t\r\n");
                 segment = segment.substr(first, last - first + 1);
-                commands.push_back(segment);
+                if (!segment.empty()) {
+                    commands.push_back(segment);
+                }
             }
         }
 
-        return commands.empty() ? std::vector<std::string>{command} : commands;
+        // If no commands found, use original
+        if (commands.empty() && !command.empty()) {
+            commands.push_back(command);
+        }
+
+        return commands;
     }
 }

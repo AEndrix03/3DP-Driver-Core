@@ -11,6 +11,11 @@
 #include "core/DriverInterface.hpp"
 #include "core/queue/CommandExecutorQueue.hpp"
 #include <memory>
+#include <thread>
+#include <queue>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
 
 namespace connector::controllers {
     class PrinterCommandController {
@@ -48,6 +53,17 @@ namespace connector::controllers {
         mutable Statistics stats_;
         bool running_;
 
+        // Async message processing
+        std::thread messageProcessingThread_;
+        std::queue<std::pair<std::string, std::string>> messageQueue_;
+        std::mutex messageQueueMutex_;
+        std::condition_variable messageQueueCondition_;
+        std::atomic<bool> messageProcessingRunning_{true};
+
         void onMessageReceived(const std::string &message, const std::string &key);
+
+        void messageProcessingLoop();
+
+        void processMessage(const std::string &message, const std::string &key);
     };
 } // namespace connector::controllers

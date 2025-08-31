@@ -7,12 +7,17 @@
 #include "logger/Logger.hpp"
 #include <stdexcept>
 #include <nlohmann/json.hpp>
+#include <thread>
+#include <queue>
+#include <mutex>
+#include <condition_variable>
 
 namespace connector::controllers {
     PrinterCommandController::PrinterCommandController(const kafka::KafkaConfig &config,
                                                        std::shared_ptr<core::DriverInterface> driver,
                                                        std::shared_ptr<core::CommandExecutorQueue> commandQueue)
-            : config_(config), driver_(driver), commandQueue_(commandQueue), running_(false) {
+            : config_(config), driver_(driver), commandQueue_(commandQueue), running_(false),
+              messageProcessingRunning_(true) {
         if (!driver_) {
             throw std::invalid_argument("DriverInterface cannot be null");
         }
@@ -31,6 +36,11 @@ namespace connector::controllers {
             processor_ = std::make_shared<processors::printer_command::PrinterCommandProcessor>(
                     sender_, commandQueue_, config_.driverId);
 
+            // Create message processing thread
+            messageProcessingThread_ = std::thread([this]() {
+                messageProcessingLoop();
+            });
+
             // Register message callback
             receiver_->setMessageCallback([this](const std::string &message, const std::string &key) {
                 onMessageReceived(message, key);
@@ -47,6 +57,17 @@ namespace connector::controllers {
 
     PrinterCommandController::~PrinterCommandController() {
         stop();
+
+        // Stop message processing thread
+        {
+            std::lock_guard<std::mutex> lock(messageQueueMutex_);
+            messageProcessingRunning_ = false;
+        }
+        messageQueueCondition_.notify_all();
+
+        if (messageProcessingThread_.joinable()) {
+            messageProcessingThread_.join();
+        }
     }
 
     void PrinterCommandController::start() {
@@ -102,6 +123,42 @@ namespace connector::controllers {
         Logger::logInfo("[PrinterCommandController] Received message, key: " + key +
                         ", size: " + std::to_string(message.size()));
 
+        // Queue message for asynchronous processing instead of processing directly
+        {
+            std::lock_guard<std::mutex> lock(messageQueueMutex_);
+            messageQueue_.emplace(message, key);
+        }
+        messageQueueCondition_.notify_one();
+
+        Logger::logInfo("[PrinterCommandController] Message queued for processing");
+    }
+
+    void PrinterCommandController::messageProcessingLoop() {
+        Logger::logInfo("[PrinterCommandController] Message processing thread started");
+
+        while (messageProcessingRunning_) {
+            std::unique_lock<std::mutex> lock(messageQueueMutex_);
+            messageQueueCondition_.wait(lock, [this] {
+                Logger::logInfo("[PrinterCommandController] Message Queue Condition acquired");
+                return !messageQueue_.empty() || !messageProcessingRunning_;
+            });
+
+            while (!messageQueue_.empty() && messageProcessingRunning_) {
+                auto messagePair = messageQueue_.front();
+                messageQueue_.pop();
+                lock.unlock();
+
+                // Process message (this was the original onMessageReceived logic)
+                processMessage(messagePair.first, messagePair.second);
+
+                lock.lock();
+            }
+        }
+
+        Logger::logInfo("[PrinterCommandController] Message processing thread stopped");
+    }
+
+    void PrinterCommandController::processMessage(const std::string &message, const std::string &key) {
         try {
             // Parse the JSON message
             nlohmann::json json = nlohmann::json::parse(message);

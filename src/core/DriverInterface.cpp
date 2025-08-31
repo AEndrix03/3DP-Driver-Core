@@ -11,10 +11,11 @@
 
 namespace core {
 
-    // Global command synchronization: define variable with external linkage so other translation units can use it.
+    // Global command synchronization with timeout support
     std::atomic<bool> g_commandInProgress{false};
     static std::mutex g_commandMutex;
     static std::condition_variable g_commandCV;
+    static std::chrono::steady_clock::time_point g_lastCommandTime;
 
     DriverInterface::DriverInterface(std::shared_ptr<Printer> printer, std::shared_ptr<SerialPort> serialPort)
             : printer_(std::move(printer)),
@@ -68,6 +69,10 @@ namespace core {
 
     void DriverInterface::resendLastCommand() const {
         if (commandExecutor_) {
+            // Force clear any stuck command
+            g_commandInProgress = false;
+            g_commandCV.notify_all();
+
             commandExecutor_->resendLastCommand();
         }
     }
@@ -104,51 +109,99 @@ namespace core {
 
     types::Result
     DriverInterface::sendCommandInternal(char category, int code, const std::vector<std::string> &params) const {
-        // CRITICAL: Wait if another command is in progress
+        // CRITICAL: Wait with timeout to prevent deadlock
+        const auto MAX_WAIT_TIME = std::chrono::seconds(30);
+        const auto STALL_DETECTION_TIME = std::chrono::seconds(10);
+
         {
             std::unique_lock<std::mutex> lock(g_commandMutex);
-            g_commandCV.wait(lock, []() { return !g_commandInProgress.load(); });
+
+            // Check for stalled command
+            if (g_commandInProgress.load()) {
+                auto now = std::chrono::steady_clock::now();
+                auto timeSinceLastCommand = now - g_lastCommandTime;
+
+                if (timeSinceLastCommand > STALL_DETECTION_TIME) {
+                    Logger::logWarning("[DriverInterface] Command stalled for " +
+                                       std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
+                                               timeSinceLastCommand).count()) +
+                                       "s, forcing recovery");
+
+                    // Force clear the flag
+                    g_commandInProgress = false;
+                    g_commandCV.notify_all();
+                }
+            }
+
+            // Wait with timeout
+            bool acquired = g_commandCV.wait_for(lock, MAX_WAIT_TIME,
+                                                 []() { return !g_commandInProgress.load(); });
+
+            if (!acquired) {
+                Logger::logError("[DriverInterface] Command wait timeout after 30s - forcing execution");
+                // Force clear and continue
+                g_commandInProgress = false;
+                g_commandCV.notify_all();
+
+                // Small delay to let other threads react
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+
             g_commandInProgress = true;
+            g_lastCommandTime = std::chrono::steady_clock::now();
         }
 
-        // Ensure we release the lock on exit
+        // RAII guard to ensure flag is always cleared
         struct CommandGuard {
             ~CommandGuard() {
                 g_commandInProgress = false;
                 g_commandCV.notify_all();
+                Logger::logInfo("[DriverInterface] Command lock released");
             }
         } guard;
 
-        // Get the next command number
-        uint16_t cmdNum = commandContext_->nextCommandNumber();
-        std::string command = CommandBuilder::buildCommand(cmdNum, category, code, params);
+        try {
+            // Get the next command number
+            uint16_t cmdNum = commandContext_->nextCommandNumber();
+            std::string command = CommandBuilder::buildCommand(cmdNum, category, code, params);
 
-        // Update state based on command
-        if (category == 'S') {
-            if (code == 1) { // Start print
-                const_cast<DriverInterface *>(this)->setState(PrintState::Printing);
-            } else if (code == 2) { // Pause
-                const_cast<DriverInterface *>(this)->setState(PrintState::Paused);
-            } else if (code == 3) { // Resume
-                const_cast<DriverInterface *>(this)->setState(PrintState::Printing);
-            } else if (code == 0) { // Homing
-                const_cast<DriverInterface *>(this)->setState(PrintState::Homing);
+            // Update state based on command
+            if (category == 'S') {
+                if (code == 1) { // Start print
+                    const_cast<DriverInterface *>(this)->setState(PrintState::Printing);
+                } else if (code == 2) { // Pause
+                    const_cast<DriverInterface *>(this)->setState(PrintState::Paused);
+                } else if (code == 3) { // Resume
+                    const_cast<DriverInterface *>(this)->setState(PrintState::Printing);
+                } else if (code == 0) { // Homing
+                    const_cast<DriverInterface *>(this)->setState(PrintState::Homing);
+                }
+            } else if (category == 'M' && code == 0) { // Emergency stop
+                const_cast<DriverInterface *>(this)->setState(PrintState::Error);
             }
-        } else if (category == 'M' && code == 0) { // Emergency stop
-            const_cast<DriverInterface *>(this)->setState(PrintState::Error);
+
+            // Send with timeout handling
+            types::Result result = commandExecutor_->sendCommandAndAwaitResponse(command, cmdNum);
+
+            // Check for timeout in result
+            if (result.code == types::ResultCode::Timeout) {
+                Logger::logError("[DriverInterface] Command timeout detected, clearing lock");
+                // The guard will clear the lock
+                return result;
+            }
+
+            // If command failed with RESEND FAILED, we need to handle it
+            if (result.message.find("RESEND FAILED") != std::string::npos) {
+                Logger::logWarning("[DriverInterface] RESEND FAILED detected, continuing execution");
+                result.code = types::ResultCode::Success;
+            }
+
+            return result;
+
+        } catch (const std::exception &e) {
+            Logger::logError("[DriverInterface] Exception in sendCommandInternal: " + std::string(e.what()));
+            // Guard will clear the lock
+            return {types::ResultCode::Error, std::string("Exception: ") + e.what()};
         }
-
-        // Send and wait for response
-        types::Result result = commandExecutor_->sendCommandAndAwaitResponse(command, cmdNum);
-
-        // If command failed with RESEND FAILED, we need to handle it
-        if (result.message.find("RESEND FAILED") != std::string::npos) {
-            Logger::logWarning("[DriverInterface] RESEND FAILED detected, continuing execution");
-            // Don't treat as error, continue
-            result.code = types::ResultCode::Success;
-        }
-
-        return result;
     }
 } // namespace core
-
