@@ -99,6 +99,9 @@ namespace core {
         std::atomic<std::chrono::steady_clock::time_point> lastExecutionTime_;
         std::atomic<bool> executionStalled_{false};
 
+        std::atomic<bool> processingThreadAlive_{false};
+        std::atomic<std::thread::id> processingThreadId_;
+
         mutable Statistics stats_;
         mutable std::mutex statsMutex_;
 
@@ -125,5 +128,10 @@ namespace core {
 
         void executeCommand(const PriorityCommand &cmd);
 
+        void restartProcessingThread();
+
+        void recoverFromStall();
+
+        bool loadFromAllSourcesSafe();
     };
 } // namespace core

@@ -94,74 +94,93 @@ namespace core {
 
     void CommandExecutorQueue::processingLoop() {
         Logger::logInfo("[CommandExecutorQueue] Processing loop started");
+        processingThreadAlive_ = true;
+        processingThreadId_ = std::this_thread::get_id();
 
         size_t executedCount = 0;
         size_t executedSinceReload = 0;
         auto lastLogTime = std::chrono::steady_clock::now();
 
-        while (running_) {
-            PriorityCommand command;
-            bool hasCommand = false;
+        try {
+            while (running_) {
+                processingThreadAlive_ = true; // Heartbeat
 
-            // FIXED: Simplified locking strategy to prevent deadlocks
-            {
-                std::unique_lock<std::mutex> lock(queueMutex_);
+                PriorityCommand command;
+                bool hasCommand = false;
 
-                // Check if stopping
-                if (stopping_) break;
+                // FIXED: Use consistent mutex ordering
+                {
+                    std::unique_lock<std::mutex> lock(queueMutex_);
 
-                // Progressive reload logic
-                if (executedSinceReload >= RELOAD_THRESHOLD) {
-                    loadFromAllSources();
-                    executedSinceReload = 0;
-                }
+                    // Check if stopping
+                    if (stopping_) break;
 
-                // Force reload if queue is low but commands available
-                if (commandQueue_.size() < RELOAD_BATCH_SIZE) {
-                    loadFromAllSources();
-                }
-
-                // Wait for commands if queue is empty
-                if (commandQueue_.empty()) {
-                    queueCondition_.wait_for(lock, std::chrono::milliseconds(100));
-                    continue;
-                }
-
-                // Get next command
-                command = commandQueue_.top();
-                commandQueue_.pop();
-                hasCommand = true;
-                executedSinceReload++;
-            }
-
-            if (hasCommand) {
-                try {
-                    // FIXED: Execute without holding locks
-                    executeCommand(command);
-                    executedCount++;
-
-                    // Update health tracking
-                    lastExecutionTime_ = std::chrono::steady_clock::now();
-                    executionStalled_ = false;
-
-                    // Progress logging
-                    if (executedCount % 100 == 0) {
-                        auto now = std::chrono::steady_clock::now();
-                        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - lastLogTime).count();
-                        Logger::logInfo("[CommandExecutorQueue] Executed: " + std::to_string(executedCount) +
-                                        ", Rate: " + std::to_string(elapsed > 0 ? 100 / elapsed : 0) + " cmd/s");
-                        lastLogTime = now;
+                    // Progressive reload logic with timeout
+                    if (executedSinceReload >= RELOAD_THRESHOLD) {
+                        if (!loadFromAllSourcesSafe()) {
+                            Logger::logWarning("[CommandExecutorQueue] Load from sources failed - continuing");
+                        }
+                        executedSinceReload = 0;
                     }
 
-                } catch (const std::exception &e) {
-                    Logger::logError("[CommandExecutorQueue] Command execution failed: " + std::string(e.what()));
-                }
-            }
+                    // Force reload if queue is low but commands available
+                    if (commandQueue_.size() < RELOAD_BATCH_SIZE) {
+                        loadFromAllSourcesSafe();
+                    }
 
-            // Small delay to prevent busy waiting
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    // Wait for commands if queue is empty
+                    if (commandQueue_.empty()) {
+                        // Use timeout to prevent infinite wait
+                        auto waitResult = queueCondition_.wait_for(lock, std::chrono::milliseconds(500));
+                        if (waitResult == std::cv_status::timeout) {
+                            // Periodic check - continue loop
+                            continue;
+                        }
+                    }
+
+                    if (commandQueue_.empty()) continue;
+
+                    // Get next command
+                    command = commandQueue_.top();
+                    commandQueue_.pop();
+                    hasCommand = true;
+                    executedSinceReload++;
+                }
+
+                if (hasCommand) {
+                    try {
+                        executeCommand(command);
+                        executedCount++;
+
+                        // Update health tracking
+                        lastExecutionTime_ = std::chrono::steady_clock::now();
+
+                        // Progress logging
+                        if (executedCount % 100 == 0) {
+                            auto now = std::chrono::steady_clock::now();
+                            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - lastLogTime).count();
+                            Logger::logInfo("[CommandExecutorQueue] Executed: " + std::to_string(executedCount) +
+                                            ", Rate: " + std::to_string(elapsed > 0 ? 100 / elapsed : 0) + " cmd/s");
+                            lastLogTime = now;
+                        }
+
+                    } catch (const std::exception &e) {
+                        Logger::logError("[CommandExecutorQueue] Command execution failed: " + std::string(e.what()));
+                        // Continue processing other commands
+                    }
+                }
+
+                // Small delay to prevent busy waiting
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        } catch (const std::exception &e) {
+            Logger::logError("[CommandExecutorQueue] Processing loop crashed: " + std::string(e.what()));
+            processingThreadAlive_ = false;
+            running_ = false;
+            throw; // Re-throw to be caught by health monitor
         }
 
+        processingThreadAlive_ = false;
         Logger::logInfo(
                 "[CommandExecutorQueue] Processing loop finished. Total executed: " + std::to_string(executedCount));
     }
@@ -179,24 +198,27 @@ namespace core {
 
             size_t totalCommands = getTotalCommandsAvailable();
 
+            // Check if processing thread is alive
+            bool threadAlive = processingThreadAlive_.load();
+
             // Detect stall condition
-            bool isStalled = totalCommands > 0 && timeSinceLastExecution > 15;
+            bool isStalled = totalCommands > 0 && (timeSinceLastExecution > 15 || !threadAlive);
 
             if (isStalled && !executionStalled_) {
                 executionStalled_ = true;
                 Logger::logError("[CommandExecutorQueue] STALL DETECTED! " +
-                                 std::to_string(timeSinceLastExecution) + "s since last execution");
+                                 std::to_string(timeSinceLastExecution) + "s since last execution, " +
+                                 "thread alive: " + (threadAlive ? "true" : "false"));
 
-                // Recovery strategy
-                {
-                    std::lock_guard<std::mutex> lock(queueMutex_);
-                    forceLoadFromDisk();
-                }
+                // AGGRESSIVE RECOVERY STRATEGY
+                if (!threadAlive || timeSinceLastExecution > 60) {
+                    Logger::logError("[CommandExecutorQueue] CRITICAL: Processing thread dead or hung - RESTARTING");
 
-                // Wake up processing thread aggressively
-                for (int i = 0; i < 10; ++i) {
-                    queueCondition_.notify_all();
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    // Force restart processing thread
+                    restartProcessingThread();
+                } else {
+                    // Standard recovery
+                    recoverFromStall();
                 }
 
                 executionStalled_ = false;
@@ -204,16 +226,16 @@ namespace core {
 
             // Periodic status log
             static int statusCounter = 0;
-            if (++statusCounter % 12 == 0 && totalCommands > 0) { // Every minute
+            if (++statusCounter % 12 == 0 && totalCommands > 0) {
                 Logger::logInfo("[CommandExecutorQueue] Health: " + std::to_string(totalCommands) +
-                                " commands pending, last exec " + std::to_string(timeSinceLastExecution) + "s ago");
+                                " commands pending, last exec " + std::to_string(timeSinceLastExecution) +
+                                "s ago, thread alive: " + (threadAlive ? "true" : "false"));
             }
         }
 
         Logger::logInfo("[CommandExecutorQueue] Health monitor stopped");
     }
 
-    // FIXED: Simplified command execution without problematic thread/timeout logic
     void CommandExecutorQueue::executeCommand(const PriorityCommand &cmd) {
         auto &tracker = jobs::JobTracker::getInstance();
         tracker.updateJobProgress(cmd.jobId, cmd.command);
@@ -569,6 +591,119 @@ namespace core {
         if (diskFile_.is_open()) {
             diskFile_.close();
             std::filesystem::remove("temp/command_queue.dat");
+        }
+    }
+
+    void CommandExecutorQueue::restartProcessingThread() {
+        Logger::logError("[CommandExecutorQueue] Forcing processing thread restart");
+
+        // Stop current thread if still joinable
+        running_ = false;
+        queueCondition_.notify_all();
+
+        if (processingThread_.joinable()) {
+            try {
+                processingThread_.join();
+                Logger::logInfo("[CommandExecutorQueue] Old processing thread joined");
+            } catch (const std::exception &e) {
+                Logger::logError("[CommandExecutorQueue] Error joining old thread: " + std::string(e.what()));
+            }
+        }
+
+        // Reset state
+        running_ = true;
+        stopping_ = false;
+        executionStalled_ = false;
+        processingThreadAlive_ = false;
+        lastExecutionTime_ = std::chrono::steady_clock::now();
+
+        // Start new processing thread
+        processingThread_ = std::thread([this]() {
+            try {
+                processingLoop();
+            } catch (const std::exception &e) {
+                Logger::logError(
+                        "[CommandExecutorQueue] Restarted processing thread crashed: " + std::string(e.what()));
+                processingThreadAlive_ = false;
+                running_ = false;
+            }
+        });
+
+        Logger::logInfo("[CommandExecutorQueue] Processing thread restarted successfully");
+    }
+
+    void CommandExecutorQueue::recoverFromStall() {
+        Logger::logInfo("[CommandExecutorQueue] Attempting standard stall recovery");
+
+        // Clear any potential deadlock by aggressive loading
+        {
+            std::lock_guard<std::mutex> lock(queueMutex_);
+            loadFromAllSourcesSafe();
+        }
+
+        // Wake up processing thread multiple times
+        for (int i = 0; i < 10; ++i) {
+            queueCondition_.notify_all();
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+
+    bool CommandExecutorQueue::loadFromAllSourcesSafe() {
+        try {
+            // FIXED: Acquire locks in consistent order to prevent deadlock
+            size_t currentSize = commandQueue_.size();
+            if (currentSize >= RELOAD_BATCH_SIZE) return true;
+
+            size_t toLoad = std::min(RELOAD_BATCH_SIZE, MAX_COMMANDS_IN_RAM - currentSize);
+            size_t loadedFromBuffer = 0;
+
+            // Load from paging buffer first (no additional locking needed)
+            while (!pagingBuffer_.empty() && loadedFromBuffer < toLoad) {
+                commandQueue_.push(pagingBuffer_.top());
+                pagingBuffer_.pop();
+                loadedFromBuffer++;
+            }
+
+            // Load from disk if needed (avoid deadlock with timeout approach)
+            if (loadedFromBuffer < toLoad) {
+                bool diskLockAcquired = false;
+                auto startTime = std::chrono::steady_clock::now();
+
+                // Try to acquire disk lock with manual timeout
+                while (!diskLockAcquired &&
+                       (std::chrono::steady_clock::now() - startTime) < std::chrono::milliseconds(50)) {
+                    std::unique_lock<std::mutex> diskLock(diskMutex_, std::try_to_lock);
+                    if (diskLock.owns_lock()) {
+                        diskLockAcquired = true;
+
+                        size_t diskToLoad = toLoad - loadedFromBuffer;
+                        size_t loadedFromDisk = 0;
+
+                        while (!diskQueue_.empty() && loadedFromDisk < diskToLoad) {
+                            commandQueue_.push(diskQueue_.front());
+                            diskQueue_.pop_front();
+                            loadedFromDisk++;
+                        }
+
+                        if (loadedFromBuffer > 0 || loadedFromDisk > 0) {
+                            Logger::logInfo("[CommandExecutorQueue] Loaded " + std::to_string(loadedFromBuffer) +
+                                            " from buffer, " + std::to_string(loadedFromDisk) + " from disk");
+                        }
+                        break;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+
+                if (!diskLockAcquired) {
+                    Logger::logWarning("[CommandExecutorQueue] Disk lock timeout - skipping disk load");
+                    return false;
+                }
+            }
+
+            return true;
+        } catch (const std::exception &e) {
+            Logger::logError("[CommandExecutorQueue] loadFromAllSourcesSafe failed: " + std::string(e.what()));
+            return false;
         }
     }
 
