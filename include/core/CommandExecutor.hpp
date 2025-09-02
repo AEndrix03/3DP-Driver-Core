@@ -7,6 +7,7 @@
 #include "core/serial/SerialPort.hpp"
 #include "CommandContext.hpp"
 #include "types/Result.hpp"
+#include "core/serial/handler/SerialProtocolHandler.hpp"
 #include <memory>
 #include <string>
 #include <mutex>
@@ -49,6 +50,7 @@ namespace core {
         std::shared_ptr<SerialPort> serial_;
         std::shared_ptr<CommandContext> context_;
         std::mutex serialMutex_;
+        std::shared_ptr<SerialProtocolHandler> protocolHandler_;
 
         // Track last sent command for recovery
         std::string lastSentCommand_;
@@ -68,7 +70,7 @@ namespace core {
          * @param commandNumber The command number to resend.
          * @return true if command was found and resent, false otherwise.
          */
-        bool handleResend(uint16_t commandNumber);
+        void handleResend(uint16_t commandNumber);
 
         /**
          * @brief Comprehensive recovery strategy for RESEND FAILED
