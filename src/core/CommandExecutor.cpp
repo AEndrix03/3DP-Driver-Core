@@ -12,7 +12,7 @@ namespace core {
         protocolHandler_ = std::make_shared<SerialProtocolHandler>(serial_);
     }
 
-    types::Result CommandExecutor::sendCommandAndAwaitResponse(const std::string &command, uint16_t commandNumber) {
+    types::Result CommandExecutor::sendCommandAndAwaitResponse(const std::string &command, uint32_t commandNumber) {
         std::lock_guard<std::mutex> lock(serialMutex_);
 
         context_->storeCommand(commandNumber, command);
@@ -22,12 +22,39 @@ namespace core {
         protocolHandler_->sendCommand(command);
         Logger::logInfo("[CommandExecutor] Sent N" + std::to_string(commandNumber) + ": " + command);
 
-        return processResponse(commandNumber);
+        types::Result result = processResponse(commandNumber);
+
+        if (result.isDuplicate()) {
+            // Se è duplicato, si passa al comando successivo e si rimuove il duplicato dallo storico
+            context_->removeCommand(result.commandNumber.value());
+            return types::Result::duplicate(result.commandNumber.value());
+        } else if (result.isResend()) {
+            // Se è resend, recupera il comando dall'history e lo reinvia. Si rimuove l'attuale comando dallo storico: verrà inserito di nuovo successivamente
+            context_->removeCommand(commandNumber);
+
+            std::string resendCommand = context_->getCommandText(result.commandNumber.value());
+
+            if (resendCommand.empty()) {
+                Logger::logError("[CommandExecutor] RESEND FAILED - command N" +
+                                 std::to_string(result.commandNumber.value()) + " not found in history");
+                return types::Result::resendError(result.commandNumber.value());
+            }
+
+            sendCommandAndAwaitResponse(resendCommand, result.commandNumber.value());
+            return sendCommandAndAwaitResponse(command, commandNumber); // Esegue nuovamente a prescindere dal result
+        } else if (result.isChecksumMismatch()) {
+            // Se il checksum non corrisponde, riesegue il comando: se era già stato eseguito arriverà DUPLICATE, se è stato saltato un comando arriverà RESEND, altrimenti OK
+            return sendCommandAndAwaitResponse(command, commandNumber);
+        }
+
+        //TODO: Other recovery strategies can be implemented here
+
+        return result;
     }
 
-    types::Result CommandExecutor::processResponse(uint16_t expectedNumber) {
+    types::Result CommandExecutor::processResponse(uint32_t expectedNumber) {
         const int maxRetries = 2;
-        const auto commandTimeout = std::chrono::milliseconds(5000);
+        const auto commandTimeout = std::chrono::milliseconds(300000);
 
         int retries = 0;
         types::Result result;
@@ -51,92 +78,88 @@ namespace core {
                 continue;
             }
 
+            if (message.rawMessage.find("BUSY") == 0 || SerialProtocolHandler::isUnknown(message)) continue;
+
             // Scarta messaggi non critici con checksum invalido
-            if (!message.isValid && message.type != MessageType::CRITICAL) {
+            if (!SerialProtocolHandler::isValidMessage(message) && message.type != MessageType::CRITICAL) {
                 Logger::logWarning("[CommandExecutor] Invalid message discarded: " + message.rawMessage);
                 continue;
             }
 
-            // Store informational data
             if (message.type == MessageType::INFORMATIONAL) {
                 result.body.push_back(message.payload);
                 continue;
             }
 
-            // Handle critical messages
             if (message.type == MessageType::CRITICAL) {
                 Logger::logInfo("[CommandExecutor] Critical: " + message.payload);
                 result.body.push_back(message.payload);
                 continue;
             }
 
-            // Handle standard responses
             if (message.type == MessageType::STANDARD) {
-                if (message.code == "OK0") {
+                if (SerialProtocolHandler::isOk(message)) {
                     result.code = types::ResultCode::Success;
                     result.message = "Command acknowledged";
                     return result;
-
-                } else if (message.isDuplicate) { // E03
-                    Logger::logInfo("[CommandExecutor] DUPLICATE response");
-                    result.code = types::ResultCode::Success;
-                    result.message = "Command already processed";
-                    return result;
-
-                } else if (message.isResendRequest) { // E04
-                    Logger::logWarning("[CommandExecutor] RESEND request for N" +
-                                       std::to_string(message.resendCommandNumber));
-                    handleResend(message.resendCommandNumber);
-                    // Reset timeout for resent command
-                    commandStartTime = std::chrono::steady_clock::now();
-                    continue;
-                    
-                } else if (message.code == "E01") { // Checksum error
-                    Logger::logWarning("[CommandExecutor] Firmware checksum error");
-                    result.code = types::ResultCode::ChecksumMismatch;
-                    result.message = "Firmware reported checksum error";
-                    return result;
-
-                } else if (message.code == "E02") { // Buffer overflow
-                    Logger::logError("[CommandExecutor] Firmware buffer overflow");
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                    continue; // Retry after delay
-
-                } else if (message.code == "E05") { // Invalid category
-                    Logger::logError("[CommandExecutor] Invalid command category");
-                    result.code = types::ResultCode::Error;
-                    result.message = "Invalid command category";
-                    return result;
-
-                } else if (message.code == "EM0") { // Motion blocked
-                    Logger::logWarning("[CommandExecutor] Motion blocked by firmware");
-                    result.code = types::ResultCode::Busy;
-                    result.message = "Motion blocked";
-                    return result;
-
-                } else if (message.code == "ET0") { // Temperature blocked
-                    Logger::logWarning("[CommandExecutor] Temperature operation blocked");
-                    result.code = types::ResultCode::Busy;
-                    result.message = "Temperature blocked";
-                    return result;
-
-                } else if (message.code == "ES0") { // Operation cancelled
-                    Logger::logInfo("[CommandExecutor] Operation cancelled by firmware");
-                    result.code = types::ResultCode::Skip;
-                    result.message = "Operation cancelled";
-                    return result;
-
-                } else if (message.code == "ES1") { // No error
-                    Logger::logInfo("[CommandExecutor] No error response");
-                    result.code = types::ResultCode::Success;
-                    result.message = "No error";
-                    return result;
-
                 } else {
-                    Logger::logWarning("[CommandExecutor] Unknown response: " + message.code);
-                    result.code = types::ResultCode::Success;
-                    result.message = "Unknown response - continuing";
-                    return result;
+                    result.commandNumber = SerialProtocolHandler::fetchMessageCommandNumber(message);
+                    if (SerialProtocolHandler::isDuplicate(message)) {
+                        Logger::logInfo("[CommandExecutor] DUPLICATE response");
+                        result.code = types::ResultCode::Duplicate;
+                        result.message = "Command already processed";
+                        return result;
+                    } else if (SerialProtocolHandler::isResend(message)) {
+                        Logger::logWarning("[CommandExecutor] RESEND request for N" +
+                                           std::to_string(result.commandNumber.value()));
+                        result.code = types::ResultCode::Resend;
+                        result.message = "Resend command";
+                        return result;
+                    } else if (SerialProtocolHandler::isChecksumMismatch(message)) {
+                        Logger::logWarning("[CommandExecutor] Firmware checksum error");
+                        result.code = types::ResultCode::ChecksumMismatch;
+                        result.message = "Firmware reported checksum error";
+                        return result;
+                    } else if (SerialProtocolHandler::isBufferOverflow(message)) {
+                        Logger::logError("[CommandExecutor] Firmware buffer overflow");
+                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                        return result;
+                    } else if (SerialProtocolHandler::isInvalidCategory(message)) {
+                        Logger::logError("[CommandExecutor] Invalid command category");
+                        result.code = types::ResultCode::Error;
+                        result.message = "Invalid command category";
+                        return result;
+
+                    } else if (SerialProtocolHandler::isMotionBlocked(message)) {
+                        Logger::logWarning("[CommandExecutor] Motion blocked by firmware");
+                        result.code = types::ResultCode::Busy;
+                        result.message = "Motion blocked";
+                        return result;
+
+                    } else if (SerialProtocolHandler::isTemperatureBlocked(message)) {
+                        Logger::logWarning("[CommandExecutor] Temperature operation blocked");
+                        result.code = types::ResultCode::Busy;
+                        result.message = "Temperature blocked";
+                        return result;
+
+                    } else if (SerialProtocolHandler::isOperationCancelled(message)) {
+                        Logger::logInfo("[CommandExecutor] Operation cancelled by firmware");
+                        result.code = types::ResultCode::Skip;
+                        result.message = "Operation cancelled";
+                        return result;
+
+                    } else if (SerialProtocolHandler::isNoError(message)) { // No error
+                        Logger::logInfo("[CommandExecutor] No error response");
+                        result.code = types::ResultCode::Success;
+                        result.message = "No error";
+                        return result;
+
+                    } else {
+                        Logger::logWarning("[CommandExecutor] Unknown response");
+                        result.code = types::ResultCode::Error;
+                        result.message = "Unknown response - continuing";
+                        return result;
+                    }
                 }
             }
         }
@@ -147,12 +170,12 @@ namespace core {
         return result;
     }
 
-    bool CommandExecutor::attemptResendFailedRecovery(uint16_t failedCommandNumber) {
+    bool CommandExecutor::attemptResendFailedRecovery(uint32_t failedCommandNumber) {
         Logger::logInfo(
                 "[CommandExecutor] Starting RESEND FAILED recovery for N" + std::to_string(failedCommandNumber));
 
         // Strategy 1: Identify what firmware expects and send it
-        uint16_t expectedByFirmware = identifyExpectedCommand(failedCommandNumber);
+        uint32_t expectedByFirmware = identifyExpectedCommand(failedCommandNumber);
         if (expectedByFirmware != 0) {
             if (sendExpectedCommand(expectedByFirmware)) {
                 Logger::logInfo(
@@ -172,12 +195,12 @@ namespace core {
         return attemptFullReset();
     }
 
-    uint16_t CommandExecutor::identifyExpectedCommand(uint16_t failedNumber) {
+    uint32_t CommandExecutor::identifyExpectedCommand(uint32_t failedNumber) {
         // Try to detect what command the firmware is waiting for
         // Usually it's the last command that didn't get confirmed
 
         // Check if we have the previous command
-        for (uint16_t candidate = failedNumber - 1; candidate >= std::max(1, (int) failedNumber - 5); candidate--) {
+        for (uint32_t candidate = failedNumber - 1; candidate >= std::max(1, (int) failedNumber - 5); candidate--) {
             if (!context_->getCommandText(candidate).empty()) {
                 Logger::logInfo("[CommandExecutor] Firmware likely expects N" + std::to_string(candidate));
                 return candidate;
@@ -188,7 +211,7 @@ namespace core {
         return failedNumber;
     }
 
-    bool CommandExecutor::sendExpectedCommand(uint16_t commandNumber) {
+    bool CommandExecutor::sendExpectedCommand(uint32_t commandNumber) {
         std::string command = context_->getCommandText(commandNumber);
         if (command.empty()) {
             Logger::logError(
@@ -203,7 +226,7 @@ namespace core {
         return true;
     }
 
-    bool CommandExecutor::attemptLineNumberReset(uint16_t fromNumber) {
+    bool CommandExecutor::attemptLineNumberReset(uint32_t fromNumber) {
         // Send M110 to reset line numbering
         std::string resetCommand = "N" + std::to_string(fromNumber) + " M110 N" + std::to_string(fromNumber);
         uint8_t checksum = computeChecksum("N" + std::to_string(fromNumber) + " M110 N" + std::to_string(fromNumber));
@@ -302,7 +325,7 @@ namespace core {
         }
     }
 
-    void CommandExecutor::handleResend(uint16_t commandNumber) {
+    void CommandExecutor::handleResend(uint32_t commandNumber) {
         std::string resendCommand = context_->getCommandText(commandNumber);
 
         if (resendCommand.empty()) {

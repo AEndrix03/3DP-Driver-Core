@@ -14,11 +14,11 @@ namespace core {
         history_.reserve(100);
     }
 
-    uint16_t CommandContext::nextCommandNumber() {
+    uint32_t CommandContext::nextCommandNumber() {
         return currentNumber_++;
     }
 
-    void CommandContext::storeCommand(uint16_t number, const std::string &commandText) {
+    void CommandContext::storeCommand(uint32_t number, const std::string &commandText) {
         // Keep only last 100 commands to prevent memory issues
         if (history_.size() >= 100) {
             // Remove oldest commands (those with lowest numbers)
@@ -36,7 +36,19 @@ namespace core {
                         " (history size: " + std::to_string(history_.size()) + ")");
     }
 
-    std::string CommandContext::getCommandText(uint16_t number) const {
+    bool CommandContext::removeCommand(uint32_t number) {
+        size_t removed = history_.erase(number);
+        if (removed > 0) {
+            Logger::logInfo("[CommandContext] Removed command N" + std::to_string(number) +
+                            " from history (history size: " + std::to_string(history_.size()) + ")");
+            return true;
+        }
+
+        Logger::logWarning("[CommandContext] No command found with N" + std::to_string(number) + "signature");
+        return false;
+    }
+
+    std::string CommandContext::getCommandText(uint32_t number) const {
         auto it = history_.find(number);
         if (it != history_.end()) {
             Logger::logInfo("[CommandContext] Retrieved command N" + std::to_string(number));

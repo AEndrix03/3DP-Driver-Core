@@ -24,12 +24,12 @@ namespace core {
 
         if (!serialPort_ || !serialPort_->isOpen()) {
             Logger::logError("[SerialProtocolHandler] Serial port not available");
-            return {MessageType::STANDARD, "", "", "", 0, 0, false, ""};
+            return {MessageType::STANDARD, MessageCodeType::UNAVAIABLE_SERIAL_PORT, "", 0, 0, ""};
         }
 
         std::string rawMessage = serialPort_->receiveLine();
         if (rawMessage.empty()) {
-            return {MessageType::STANDARD, "", "", "", 0, 0, false, ""};
+            return {MessageType::STANDARD, MessageCodeType::EMPTY_MESSAGE, "", 0, 0, ""};
         }
 
         Logger::logInfo("[SerialProtocolHandler] Raw message received: " + rawMessage);
@@ -45,18 +45,17 @@ namespace core {
         }
 
         // Per messaggi standard/informativi: valida e processa
-        if (!message.isValid) {
+        if (!isValidMessage(message)) {
             Logger::logWarning("[SerialProtocolHandler] Checksum mismatch - discarding message: " + rawMessage);
-            // Per messaggi non critici, scarta e continua
-            return {MessageType::STANDARD, "", "", "", 0, 0, false, rawMessage};
+            return {MessageType::STANDARD, MessageCodeType::CHECKSUM_ERROR_SKIP, "", 0, 0, rawMessage};
         }
 
-        Logger::logInfo("[SerialProtocolHandler] Message validated successfully: " + message.code);
+        Logger::logInfo("[SerialProtocolHandler] Message validated successfully");
         return message;
     }
 
     void SerialProtocolHandler::sendCommand(const std::string &command) {
-        if (serialPort_ && serialPort_->isOpen()) {
+        if (isOpen()) {
             serialPort_->send(command);
         } else {
             Logger::logError("[SerialProtocolHandler] Cannot send - serial port not available");
@@ -79,7 +78,7 @@ namespace core {
         size_t pos = message.find(" *");
         if (pos == std::string::npos) {
             Logger::logWarning("[SerialProtocolHandler] No checksum found in message: " + message);
-            return 0; // Return 0 if no checksum found
+            return -1; // Return 0 if no checksum found
         }
 
         std::string checksumStr = message.substr(pos + 2);
@@ -87,7 +86,7 @@ namespace core {
             return static_cast<uint8_t>(std::stoi(checksumStr));
         } catch (const std::exception &e) {
             Logger::logError("[SerialProtocolHandler] Invalid checksum format: " + checksumStr);
-            return 0;
+            return -1;
         }
     }
 
@@ -124,65 +123,28 @@ namespace core {
         SerialMessage message;
         message.rawMessage = rawMessage;
         message.type = identifyMessageType(rawMessage);
-        message.isDuplicate = false;
-        message.isResendRequest = false;
-        message.resendCommandNumber = 0;
-
-        // Extract checksum
         message.receivedChecksum = extractChecksum(rawMessage);
-
-        // Get payload (message without checksum)
         std::string payload = getMessagePayload(rawMessage);
         message.payload = payload;
-
-        // Calculate expected checksum
         message.calculatedChecksum = computeChecksum(payload);
 
-        // Validate checksum
-        message.isValid = (message.receivedChecksum == message.calculatedChecksum);
-
-        // Parse components based on message type
         std::istringstream iss(payload);
         std::string token;
-        iss >> token; // First token is the code
-        message.code = token;
-
-        // Extract command number if present (N123 format)
-        if (message.type == MessageType::STANDARD) {
-            if (iss >> token && token.find("N") == 0) {
-                message.commandNumber = token;
-
-                // Parse command number for E03/E04 handling
-                try {
-                    uint16_t cmdNum = static_cast<uint16_t>(std::stoul(token.substr(1)));
-
-                    // Handle specific error codes
-                    if (message.code == "E03") {
-                        message.isDuplicate = true;
-                        Logger::logInfo("[SerialProtocolHandler] DUPLICATE detected for N" + std::to_string(cmdNum));
-                    } else if (message.code == "E04") {
-                        message.isResendRequest = true;
-                        message.resendCommandNumber = cmdNum;
-                        Logger::logInfo("[SerialProtocolHandler] RESEND requested for N" + std::to_string(cmdNum));
-                    }
-                } catch (const std::exception &e) {
-                    Logger::logWarning("[SerialProtocolHandler] Failed to parse command number: " + token);
-                }
-            }
-        }
+        iss >> token;
+        message.code = decodeMessageCodeFromString(token);
 
         Logger::logInfo(std::string("[SerialProtocolHandler] Parsed - Type: ") +
                         (message.type == MessageType::CRITICAL ? "CRT" :
                          message.type == MessageType::STANDARD ? "STD" : "INF") +
-                        ", Code: " + message.code +
-                        ", Valid: " + (message.isValid ? "true" : "false") +
+                        ", Code: " + token +
+                        ", Valid: " + (isValidMessage(message) ? "true" : "false") +
                         ", Checksum: " + std::to_string(message.receivedChecksum) + "/" +
                         std::to_string(message.calculatedChecksum));
         return message;
     }
 
     void SerialProtocolHandler::sendAck(uint8_t checksum) {
-        if (!serialPort_ || !serialPort_->isOpen()) {
+        if (!isOpen()) {
             Logger::logError("[SerialProtocolHandler] Cannot send ACK - serial port not available");
             return;
         }
@@ -197,10 +159,10 @@ namespace core {
         Logger::logInfo("[SerialProtocolHandler] Sent ACK: " + ackMessage);
     }
 
-    SerialMessage SerialProtocolHandler::handleCriticalMessage(const SerialMessage &message) {
+    SerialMessage SerialProtocolHandler::handleCriticalMessage(SerialMessage &message) {
         Logger::logInfo("[SerialProtocolHandler] Handling critical message: " + message.rawMessage);
 
-        if (message.isValid) {
+        if (isValidMessage(message)) {
             Logger::logInfo("[SerialProtocolHandler] Critical message valid - processing");
             return message;
         }
@@ -215,16 +177,16 @@ namespace core {
         return retryMessage;
     }
 
-    SerialMessage SerialProtocolHandler::waitForRetryMessage(int timeoutMs) {
+    SerialMessage SerialProtocolHandler::waitForRetryMessage(long timeoutMs) {
         Logger::logInfo("[SerialProtocolHandler] Waiting for firmware retry...");
 
         auto startTime = std::chrono::steady_clock::now();
         auto timeout = std::chrono::milliseconds(timeoutMs);
 
         while (std::chrono::steady_clock::now() - startTime < timeout) {
-            if (!serialPort_ || !serialPort_->isOpen()) {
+            if (!isOpen()) {
                 Logger::logError("[SerialProtocolHandler] Serial port lost during retry wait");
-                break;
+                return {MessageType::CRITICAL, MessageCodeType::UNAVAIABLE_SERIAL_PORT, "", 0, 0, ""};
             }
 
             std::string rawMessage = serialPort_->receiveLine();
@@ -236,12 +198,11 @@ namespace core {
                 // Invia ACK per il nuovo messaggio
                 sendAck(retryMessage.calculatedChecksum > 0 ? retryMessage.calculatedChecksum : 0);
 
-                if (retryMessage.isValid) {
+                if (isValidMessage(retryMessage)) {
                     Logger::logInfo("[SerialProtocolHandler] Retry message valid - unblocking");
                     return retryMessage;
                 } else {
                     Logger::logWarning("[SerialProtocolHandler] Retry message still invalid - continuing wait");
-                    // Continue waiting for valid message
                 }
             }
 
@@ -249,7 +210,8 @@ namespace core {
         }
 
         Logger::logError("[SerialProtocolHandler] Timeout waiting for valid retry message");
-        return {MessageType::CRITICAL, "", "", "", 0, 0, false, "TIMEOUT"};
+        return {MessageType::CRITICAL, MessageCodeType::CRITICAL_MESSAGE_PROCESSING_ERROR, "", 0, 0,
+                "UNAVAIABLE_SERIAL_PORT"};
     }
 
 } // namespace core

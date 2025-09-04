@@ -6,6 +6,7 @@
 
 #include "core/serial/SerialPort.hpp"
 #include "core/types/Result.hpp"
+#include "logger/Logger.hpp"
 #include <memory>
 #include <string>
 #include <mutex>
@@ -20,18 +21,31 @@ namespace core {
         CRITICAL       // CRT TMP 205.4 200.0 *89
     };
 
+    enum class MessageCodeType {
+        OK,
+        CHECKSUM_ERROR,
+        CHECKSUM_ERROR_SKIP,
+        BUFFER_OVERFLOW_ERROR,
+        DUPLICATE_COMMAND_ERROR,
+        RESEND_COMMAND_ERROR,
+        INVALID_CATEGORY_ERROR,
+        BLOCKED_MOTION_ERROR,
+        BLOCKED_TEMP_ERROR,
+        CANCELLED_ERROR,
+        NO_ERR,
+        UNKNOWN,
+        UNAVAIABLE_SERIAL_PORT,
+        EMPTY_MESSAGE,
+        CRITICAL_MESSAGE_PROCESSING_ERROR,
+    };
+
     struct SerialMessage {
         MessageType type;
-        std::string code;           // OK0, E01, POS, TMP, etc.
-        std::string commandNumber;  // N123 (se presente)
-        std::string payload;        // Dati completi
+        MessageCodeType code;
+        std::string payload;
         uint8_t receivedChecksum;
         uint8_t calculatedChecksum;
-        bool isValid;
         std::string rawMessage;
-        uint16_t resendCommandNumber; // Per E04 - comando da reinviare
-        bool isDuplicate;           // Per E03
-        bool isResendRequest;       // Per E04
     };
 
     /**
@@ -59,6 +73,95 @@ namespace core {
          * @brief Controlla se la porta seriale è aperta
          */
         bool isOpen() const;
+
+        static inline MessageCodeType decodeMessageCodeFromString(const std::string &code) {
+            if (code == "OK0")
+                return MessageCodeType::OK;
+            else if (code == "E01")
+                return MessageCodeType::CHECKSUM_ERROR;
+            else if (code == "E02")
+                return MessageCodeType::BUFFER_OVERFLOW_ERROR;
+            else if (code == "E03")
+                return MessageCodeType::DUPLICATE_COMMAND_ERROR;
+            else if (code == "E04")
+                return MessageCodeType::RESEND_COMMAND_ERROR;
+            else if (code == "E05")
+                return MessageCodeType::INVALID_CATEGORY_ERROR;
+            else if (code == "EM0")
+                return MessageCodeType::BLOCKED_MOTION_ERROR;
+            else if (code == "ET0")
+                return MessageCodeType::BLOCKED_TEMP_ERROR;
+            else if (code == "ES0")
+                return MessageCodeType::CANCELLED_ERROR;
+            else if (code == "ES1")
+                return MessageCodeType::NO_ERR;
+            else
+                return MessageCodeType::UNKNOWN;
+        }
+
+        static bool isOk(const SerialMessage &message) {
+            return message.code == MessageCodeType::OK;
+        }
+
+        static inline bool isDuplicate(const SerialMessage &message) {
+            return message.code == MessageCodeType::DUPLICATE_COMMAND_ERROR;
+        }
+
+        static bool isResend(const SerialMessage &message) {
+            return message.code == MessageCodeType::RESEND_COMMAND_ERROR;
+        }
+
+        static bool isChecksumMismatch(const SerialMessage &message) {
+            return message.code == MessageCodeType::CHECKSUM_ERROR;
+        }
+
+        static bool isBufferOverflow(const SerialMessage &message) {
+            return message.code == MessageCodeType::BUFFER_OVERFLOW_ERROR;
+        }
+
+        static bool isInvalidCategory(const SerialMessage &message) {
+            return message.code == MessageCodeType::INVALID_CATEGORY_ERROR;
+        }
+
+        static bool isMotionBlocked(const SerialMessage &message) {
+            return message.code == MessageCodeType::BLOCKED_MOTION_ERROR;
+        }
+
+        static bool isTemperatureBlocked(const SerialMessage &message) {
+            return message.code == MessageCodeType::BLOCKED_TEMP_ERROR;
+        }
+
+        static bool isOperationCancelled(const SerialMessage &message) {
+            return message.code == MessageCodeType::CANCELLED_ERROR;
+        }
+
+        static bool isNoError(const SerialMessage &message) {
+            return message.code == MessageCodeType::NO_ERR;
+        }
+
+        static bool isUnknown(const SerialMessage &message) {
+            return message.code == MessageCodeType::UNKNOWN;
+        }
+
+        static bool isValidMessage(const SerialMessage &message) {
+            return message.receivedChecksum == message.calculatedChecksum;
+        }
+
+        static uint32_t fetchMessageCommandNumber(const SerialMessage &message) {
+            std::istringstream iss(message.payload);
+            std::string token;
+            iss >> token;
+
+            if (iss >> token && token.find('N') == 0) {
+                try {
+                    return static_cast<uint32_t>(std::stoul(token.substr(1)));
+                } catch (const std::exception &e) {
+                    Logger::logError("[SerialProtocolHandler] Failed to parse command number: " + token);
+                }
+            }
+
+            return -1;
+        }
 
     private:
         std::shared_ptr<SerialPort> serialPort_;
@@ -112,14 +215,13 @@ namespace core {
          * @param message Messaggio CRT ricevuto
          * @return SerialMessage validato o nuovo messaggio ricevuto
          */
-        SerialMessage handleCriticalMessage(const SerialMessage &message);
+        SerialMessage handleCriticalMessage(SerialMessage &message);
 
         /**
          * @brief Attende un nuovo messaggio dal firmware (per messaggi CRT con errore)
-         * @param timeoutMs Timeout in millisecondi
          * @return Nuovo messaggio ricevuto
          */
-        SerialMessage waitForRetryMessage(int timeoutMs = 5000);
+        SerialMessage waitForRetryMessage(long timeoutMs = 300000);
     };
 
 } // namespace core

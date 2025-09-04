@@ -9,6 +9,8 @@
 
 #include "core/printer/job/tracking/JobTracker.hpp"
 #include "core/printer/state/StateTracker.hpp"
+#include "core/exceptions/ResendErrorCommandException.hpp"
+#include "core/exceptions/DuplicateErrorCommandException.hpp"
 
 namespace core {
     static constexpr size_t MAX_COMMANDS_IN_RAM = 10000;
@@ -150,6 +152,16 @@ namespace core {
                 if (hasCommand) {
                     try {
                         executeCommand(command);
+
+                        /*
+                         * PROBLEMA
+                         * Se sono in resend error è perchè nel context manca il comando. Eseguire un executeCommand con il comando recuperato
+                         * non funzionerà:
+                         * - O si aggiunge nel context con quel numero di resend il comando (ma potrebbe essere già stato eseguito): ideare una struttura per tracciare TUTTI i comandi con numero, asociando un controllo integrità veloce.
+                         *   Se il comando candidato ha integrità equivalente a quello in history, lo eseguo. Altrimenti resetta il resend block:
+                         *   aggiunge nel context il comando con quel numero e poi manda la execute vuota (che verrà ignorata dal firmware, ma sbloccherà).
+                         */
+
                         executedCount++;
 
                         // Update health tracking
@@ -259,7 +271,6 @@ namespace core {
         }
 
         try {
-            // FIXED: Direct execution without complex timeout/threading
             translator_->parseLine(cmd.command);
             updateStats(true, false);
 
@@ -273,7 +284,19 @@ namespace core {
         } catch (const GCodeTranslatorUnknownCommandException &e) {
             updateStats(false, true);
             Logger::logWarning("[CommandExecutorQueue] Unknown G-code: " + cmd.command + " - " + std::string(e.what()));
-        } catch (const std::exception &e) {
+        } catch (const core::exceptions::ResendErrorCommandException &e) {
+            updateStats(false, true);
+            Logger::logError("[CommandExecutorQueue] Resend Error: " + cmd.command + " - " +
+                             std::string(e.what()));
+            throw;
+        } catch (const core::exceptions::DuplicateErrorCommandException &e) {
+            updateStats(false, true);
+            Logger::logError("[CommandExecutorQueue] Duplicate Error: " + cmd.command + " - " +
+                             std::string(e.what()));
+            throw;
+        }
+
+        catch (const std::exception &e) {
             updateStats(false, true);
             Logger::logError(
                     "[CommandExecutorQueue] Execution error for '" + cmd.command + "': " + std::string(e.what()));

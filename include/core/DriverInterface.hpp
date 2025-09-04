@@ -49,7 +49,7 @@ namespace core {
 
         void setState(PrintState newState);
 
-        std::string printStateToString(PrintState state) const;
+        static std::string printStateToString(PrintState state);
 
         types::Result sendCommandInternal(char category, int code, const std::vector<std::string> &params) const;
 

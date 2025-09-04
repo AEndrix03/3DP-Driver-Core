@@ -38,7 +38,7 @@ namespace core {
          * @param commandNumber Numero del comando associato.
          * @return Esito dell'operazione.
          */
-        types::Result sendCommandAndAwaitResponse(const std::string &command, uint16_t commandNumber);
+        types::Result sendCommandAndAwaitResponse(const std::string &command, uint32_t commandNumber);
 
         /**
          * @brief Resend the last command (for health recovery).
@@ -54,7 +54,7 @@ namespace core {
 
         // Track last sent command for recovery
         std::string lastSentCommand_;
-        uint16_t lastSentNumber_ = 0;
+        uint32_t lastSentNumber_ = 0;
         bool firmwareSyncLost_ = false;
 
         /**
@@ -63,42 +63,42 @@ namespace core {
          * @param expectedNumber The command number we're waiting for.
          * @return Result of the command execution.
          */
-        types::Result processResponse(uint16_t expectedNumber);
+        types::Result processResponse(uint32_t expectedNumber);
 
         /**
          * @brief Handle a RESEND request for a specific command.
          * @param commandNumber The command number to resend.
          * @return true if command was found and resent, false otherwise.
          */
-        void handleResend(uint16_t commandNumber);
+        void handleResend(uint32_t commandNumber);
 
         /**
          * @brief Comprehensive recovery strategy for RESEND FAILED
          * @param failedCommandNumber Command that triggered RESEND FAILED
          * @return true if recovery successful, false otherwise
          */
-        bool attemptResendFailedRecovery(uint16_t failedCommandNumber);
+        bool attemptResendFailedRecovery(uint32_t failedCommandNumber);
 
         /**
          * @brief Identify which command the firmware expects
          * @param failedNumber Command number that failed
          * @return Command number firmware likely expects
          */
-        uint16_t identifyExpectedCommand(uint16_t failedNumber);
+        uint32_t identifyExpectedCommand(uint32_t failedNumber);
 
         /**
          * @brief Send the specific command firmware expects
          * @param commandNumber Command to send
          * @return true if command was sent, false if not found
          */
-        bool sendExpectedCommand(uint16_t commandNumber);
+        bool sendExpectedCommand(uint32_t commandNumber);
 
         /**
          * @brief Reset line numbering using M110
          * @param fromNumber Starting number for reset
          * @return true if reset command sent
          */
-        bool attemptLineNumberReset(uint16_t fromNumber);
+        bool attemptLineNumberReset(uint32_t fromNumber);
 
         /**
          * @brief Full firmware reset as last resort

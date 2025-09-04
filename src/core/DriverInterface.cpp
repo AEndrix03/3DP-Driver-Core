@@ -87,7 +87,7 @@ namespace core {
         }
     }
 
-    std::string DriverInterface::printStateToString(PrintState state) const {
+    std::string DriverInterface::printStateToString(PrintState state) {
         switch (state) {
             case PrintState::Idle:
                 return "Idle";
@@ -104,18 +104,17 @@ namespace core {
         }
     }
 
-    // FIXED: Removed global mutex causing deadlock
     types::Result
     DriverInterface::sendCommandInternal(char category, int code, const std::vector<std::string> &params) const {
-        // SOLUTION: Use instance-level synchronization instead of global mutex
         std::lock_guard<std::mutex> lock(commandMutex_);
 
         try {
             // Get the next command number
-            uint16_t cmdNum = commandContext_->nextCommandNumber();
+            uint32_t cmdNum = commandContext_->nextCommandNumber();
             std::string command = CommandBuilder::buildCommand(cmdNum, category, code, params);
 
             // Update state based on command
+            //TODO: Controllare se ha senso qui. In teoria setta lo stato prima di sapere se il comando va a buon fine...
             if (category == 'S') {
                 if (code == 1) { // Start print
                     const_cast<DriverInterface *>(this)->setState(PrintState::Printing);
@@ -132,12 +131,6 @@ namespace core {
 
             // Send command with timeout handling
             types::Result result = commandExecutor_->sendCommandAndAwaitResponse(command, cmdNum);
-
-            // Handle RESEND FAILED gracefully
-            if (result.message.find("RESEND FAILED") != std::string::npos) {
-                Logger::logWarning("[DriverInterface] RESEND FAILED detected, continuing execution");
-                result.code = types::ResultCode::Success;
-            }
 
             return result;
 
