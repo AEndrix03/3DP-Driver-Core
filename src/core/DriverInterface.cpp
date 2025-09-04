@@ -61,19 +61,6 @@ namespace core {
         return temperature_;
     }
 
-    types::Result DriverInterface::sendCustomCommand(const std::string &rawCommand) const {
-        if (!printer_->sendCommand(rawCommand)) {
-            return {types::ResultCode::Error, "Failed to send custom command."};
-        }
-        return {types::ResultCode::Success, "Custom command sent."};
-    }
-
-    void DriverInterface::resendLastCommand() const {
-        if (commandExecutor_) {
-            commandExecutor_->resendLastCommand();
-        }
-    }
-
     PrintState DriverInterface::getState() const {
         return currentState_;
     }

@@ -3,6 +3,7 @@
 #include <string>
 #include <optional>
 #include <vector>
+#include <cstdint>
 
 namespace core::types {
 

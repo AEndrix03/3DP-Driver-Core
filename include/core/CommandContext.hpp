@@ -24,7 +24,17 @@ namespace core {
          * @brief Ottiene il prossimo numero di comando disponibile.
          * @return Numero comando incrementale.
          */
-        uint32_t nextCommandNumber();
+        inline uint32_t nextCommandNumber() {
+            return currentNumber_++;
+        }
+
+        /*
+         * @brief Imposta il numero di comando corrente (usato per sincronizzazione esterna).
+         * @param number Numero comando da impostare.
+         */
+        inline void setCommandNumber(uint32_t number) {
+            currentNumber_ = number;
+        }
 
         /**
          * @brief Salva un comando nel buffer storico.

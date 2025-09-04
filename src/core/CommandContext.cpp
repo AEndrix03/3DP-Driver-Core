@@ -14,10 +14,6 @@ namespace core {
         history_.reserve(100);
     }
 
-    uint32_t CommandContext::nextCommandNumber() {
-        return currentNumber_++;
-    }
-
     void CommandContext::storeCommand(uint32_t number, const std::string &commandText) {
         // Keep only last 100 commands to prevent memory issues
         if (history_.size() >= 100) {

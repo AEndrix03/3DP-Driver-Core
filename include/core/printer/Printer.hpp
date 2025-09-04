@@ -10,8 +10,6 @@ namespace core {
 
         virtual void initialize() = 0;
 
-        virtual bool sendCommand(const std::string &command) = 0;
-
         virtual void shutdown() = 0;
     };
 

@@ -41,10 +41,6 @@ namespace core {
 
         std::shared_ptr<command::temperature::TemperatureCommands> temperature() const;
 
-        types::Result sendCustomCommand(const std::string &rawCommand) const;
-
-        void resendLastCommand() const;
-
         PrintState getState() const;
 
         void setState(PrintState newState);

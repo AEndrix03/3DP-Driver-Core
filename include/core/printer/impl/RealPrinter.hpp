@@ -17,8 +17,6 @@ namespace core {
 
         void initialize() override;
 
-        bool sendCommand(const std::string &command) override;
-
         void shutdown() override;
 
         // Enhanced methods
