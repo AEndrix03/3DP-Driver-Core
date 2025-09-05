@@ -14,7 +14,11 @@ namespace core {
 
     types::Result CommandExecutor::sendCommandAndAwaitResponse(const std::string &command, uint32_t commandNumber) {
         std::lock_guard<std::mutex> lock(serialMutex_);
+        return sendCommandAndAwaitResponseLocked(command, commandNumber);
+    }
 
+    types::Result
+    CommandExecutor::sendCommandAndAwaitResponseLocked(const std::string &command, uint32_t commandNumber) {
         context_->storeCommand(commandNumber, command);
         lastSentCommand_ = command;
         lastSentNumber_ = commandNumber;
@@ -41,11 +45,15 @@ namespace core {
                 return types::Result::resendError(result.commandNumber.value());
             }
 
-            sendCommandAndAwaitResponse(resendCommand, result.commandNumber.value());
-            return sendCommandAndAwaitResponse(command, commandNumber); // Esegue nuovamente a prescindere dal result
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            sendCommandAndAwaitResponseLocked(resendCommand, result.commandNumber.value());
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            return sendCommandAndAwaitResponseLocked(command,
+                                                     commandNumber); // Esegue nuovamente a prescindere dal result
         } else if (result.isChecksumMismatch()) {
             // Se il checksum non corrisponde, riesegue il comando: se era già stato eseguito arriverà DUPLICATE, se è stato saltato un comando arriverà RESEND, altrimenti OK
-            return sendCommandAndAwaitResponse(command, commandNumber);
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            return sendCommandAndAwaitResponseLocked(command, commandNumber);
         } else if (result.isSuccess() && result.commandNumber.has_value()) {
             context_->removeCommand(commandNumber);
             Logger::logInfo("[CommandExecutor] SET Command N" + std::to_string(result.commandNumber.value()) +

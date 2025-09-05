@@ -58,6 +58,8 @@ namespace core {
          */
         types::Result processResponse(uint32_t expectedNumber);
 
+        types::Result sendCommandAndAwaitResponseLocked(const std::string &command, uint32_t commandNumber);
+
     };
 
 } // namespace core
