@@ -46,7 +46,10 @@ namespace core {
 
         // Per messaggi standard/informativi: valida e processa
         if (!isValidMessage(message)) {
-            Logger::logWarning("[SerialProtocolHandler] Checksum mismatch - discarding message: " + rawMessage);
+            // Skip BUSY
+            if (message.rawMessage.find("BUSY") != 0) {
+                Logger::logWarning("[SerialProtocolHandler] Checksum mismatch - discarding message: " + rawMessage);
+            }
             return {MessageType::STANDARD, MessageCodeType::CHECKSUM_ERROR_SKIP, "", 0, 0, rawMessage};
         }
 
@@ -77,7 +80,9 @@ namespace core {
     uint8_t SerialProtocolHandler::extractChecksum(const std::string &message) const {
         size_t pos = message.find(" *");
         if (pos == std::string::npos) {
-            Logger::logWarning("[SerialProtocolHandler] No checksum found in message: " + message);
+            if (message.find("BUSY") != 0) { // Skip BUSY
+                Logger::logWarning("[SerialProtocolHandler] No checksum found in message: " + message);
+            }
             return -1; // Return 0 if no checksum found
         }
 
@@ -133,13 +138,16 @@ namespace core {
         iss >> token;
         message.code = decodeMessageCodeFromString(token);
 
-        Logger::logInfo(std::string("[SerialProtocolHandler] Parsed - Type: ") +
-                        (message.type == MessageType::CRITICAL ? "CRT" :
-                         message.type == MessageType::STANDARD ? "STD" : "INF") +
-                        ", Code: " + token +
-                        ", Valid: " + (isValidMessage(message) ? "true" : "false") +
-                        ", Checksum: " + std::to_string(message.receivedChecksum) + "/" +
-                        std::to_string(message.calculatedChecksum));
+        if (token.find("BUSY") != 0) { // Skip BUSY log
+            Logger::logInfo(std::string("[SerialProtocolHandler] Parsed - Type: ") +
+                            (message.type == MessageType::CRITICAL ? "CRT" :
+                             message.type == MessageType::STANDARD ? "STD" : "INF") +
+                            ", Code: " + token +
+                            ", Valid: " + (isValidMessage(message) ? "true" : "false") +
+                            ", Checksum: " + std::to_string(message.receivedChecksum) + "/" +
+                            std::to_string(message.calculatedChecksum));
+        }
+
         return message;
     }
 
