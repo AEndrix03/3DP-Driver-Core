@@ -885,6 +885,9 @@ static void testHomingAndEndstops() {
     CHECK(sim::steps().x == -700 && sim::steps().y == yBefore);
 
     // --- finecorsa urtato durante la stampa: arresto e stato di errore ---
+    // Con la posizione riferita i limiti di corsa lo impediscono: puo' succedere solo
+    // se il riferimento e' andato perso (qui: motori spenti da un arresto di emergenza).
+    CHECK(driver->motion()->emergencyStop().isSuccess());
     CHECK(driver->system()->startPrint().isSuccess());
     CHECK(driver->motion()->moveAbsolute({-5.0, std::nullopt, std::nullopt, std::nullopt, 3000.0}).isSuccess());
     CHECK(waitFor([&] {
@@ -977,6 +980,122 @@ namespace {
 
     sim::Steps referenceSteps; // posizione finale di una stampa senza interruzioni
     const long E_PER_LINE = static_cast<long>(E_PER_MOVE * 80);
+}
+
+constexpr uint8_t ENABLE_PIN = 8; // LOW = motori alimentati
+
+static void testTravelLimits() {
+    normalize();
+    sim::setEndstop(0, -800);
+    sim::setEndstop(1, -800);
+    sim::setEndstop(2, -400);
+    CHECK(driver->system()->homing().isSuccess());
+    CHECK(driver->system()->startPrint().isSuccess());
+    const auto home = sim::steps();
+    const auto at = [](double x, double y, double z) {
+        return core::command::motion::MoveTarget{x, y, z, std::nullopt, 6000.0};
+    };
+
+    // Oltre il volume di lavoro (220 x 220 x 200): rifiutato, nessuno step
+    auto result = driver->motion()->moveAbsolute({230.0, std::nullopt, std::nullopt, std::nullopt, 6000.0});
+    CHECK(result.isRejected());
+    CHECK_MSG(result.message.find("LIMIT") != std::string::npos, result.message);
+    CHECK(driver->motion()->moveAbsolute({std::nullopt, -0.5, std::nullopt, std::nullopt, 6000.0}).isRejected());
+    CHECK(driver->motion()->moveAbsolute({std::nullopt, std::nullopt, 200.5, std::nullopt, 600.0}).isRejected());
+    // un solo asse fuori basta a rifiutare tutto il movimento
+    CHECK(driver->motion()->moveAbsolute(at(10.0, 221.0, 1.0)).isRejected());
+    CHECK(idle());
+    CHECK(sim::steps().x == home.x && sim::steps().y == home.y && sim::steps().z == home.z);
+    CHECK(!driver->isLinkFaulted()); // un rifiuto non e' un guasto del collegamento
+
+    // I bordi sono raggiungibili, e i movimenti relativi sono controllati sulla destinazione
+    sim::setTimeScale(8.0);
+    CHECK(driver->motion()->moveAbsolute({220.0, 220.0, std::nullopt, std::nullopt, 6000.0}).isSuccess());
+    CHECK(driver->motion()->moveRelative({0.1, std::nullopt, std::nullopt, std::nullopt, 6000.0}).isRejected());
+    CHECK(driver->motion()->moveRelative({-20.0, std::nullopt, std::nullopt, std::nullopt, 6000.0}).isSuccess());
+    CHECK(idle());
+    sim::setTimeScale(1.0);
+    CHECK(sim::steps().x == -800 + 200 * 80 && sim::steps().y == -800 + 220 * 80);
+
+    // Posizione impostata a mano fuori dal volume: l'asse puo' rientrare, non allontanarsi
+    CHECK(driver->motion()->setPosition({-10.0, std::nullopt, std::nullopt, std::nullopt, std::nullopt}).isSuccess());
+    CHECK(driver->motion()->moveRelative({-1.0, std::nullopt, std::nullopt, std::nullopt, 6000.0}).isRejected());
+    CHECK(driver->motion()->moveRelative({4.0, std::nullopt, std::nullopt, std::nullopt, 6000.0}).isSuccess());
+    CHECK(idle());
+
+    // Un job che esce dal volume fallisce su quella riga invece di proseguire
+    CHECK(driver->system()->endPrint().isSuccess());
+    std::filesystem::create_directories("gcode");
+    {
+        std::ofstream out("gcode/out_of_volume.gcode");
+        out << "G28\nG90\nG1 X50 Y50 F6000\nG1 X300 Y50\nG1 X60 Y60\n";
+    }
+    {
+        JobRig rig;
+        sim::setTimeScale(8.0);
+        CHECK(rig.manager->startPrintJob("gcode/out_of_volume.gcode", "job-limit"));
+        CHECK(rig.waitState(core::print::JobState::FAILED, 60s));
+        CHECK(idle());
+        sim::setTimeScale(1.0);
+        // fermo all'ultima posizione valida: la riga dopo quella rifiutata non e' stata eseguita
+        CHECK_MSG(sim::steps().x == -800 + 50 * 80 && sim::steps().y == -800 + 50 * 80,
+                  "x=" + std::to_string(sim::steps().x) + " y=" + std::to_string(sim::steps().y));
+    }
+    std::error_code ec;
+    std::filesystem::remove_all(core::print::JobCheckpoint::directory(), ec);
+}
+
+static void testMotorEnable() {
+    normalize();
+    CHECK(!sim::pinLevel(ENABLE_PIN)); // alimentati dall'avvio
+
+    // --- emergenza: oltre a fermare gli step toglie corrente ai motori ---
+    CHECK(driver->system()->startPrint().isSuccess());
+    CHECK(driver->motion()->moveRelative({50.0, std::nullopt, std::nullopt, std::nullopt, 3000.0}).isSuccess());
+    sim::setEndstop(0, 400); // un finecorsa scatta a meta' movimento -> allarme
+    CHECK(waitFor([&] { return sim::pinLevel(ENABLE_PIN); }, 5s));
+    sim::clearEndstops();
+    CHECK(driver->waitForIdle(3s));
+
+    // Un motore senza corrente puo' essere spostato a mano: la posizione non e' piu' riferita
+    bool referenced = true;
+    CHECK(driver->motion()->getPosition(&referenced).has_value());
+    CHECK(!referenced);
+
+    // Restano spenti finche' l'errore non viene azzerato
+    CHECK(driver->motion()->moveRelative({1.0, std::nullopt, std::nullopt, std::nullopt, 600.0}).isBusy());
+    CHECK(sim::pinLevel(ENABLE_PIN));
+    CHECK(driver->system()->clearError().isSuccess());
+    CHECK(!sim::pinLevel(ENABLE_PIN));
+
+    // --- M0 dall'host spegne i motori; il primo movimento li riaccende ---
+    CHECK(driver->system()->endPrint().isSuccess());
+    CHECK(driver->system()->startPrint().isSuccess());
+    CHECK(driver->motion()->emergencyStop().isSuccess());
+    CHECK(sim::pinLevel(ENABLE_PIN));
+    sim::resetSteps();
+    CHECK(driver->motion()->moveRelative({1.0, std::nullopt, std::nullopt, std::nullopt, 600.0}).isSuccess());
+    CHECK(!sim::pinLevel(ENABLE_PIN));
+    CHECK(idle());
+    CHECK(sim::steps().x == 80);
+
+    // --- 31 minuti di inattivita' in pausa: i motori restano alimentati e riferiti ---
+    CHECK(driver->motion()->setPosition({10.0, 10.0, 1.0, std::nullopt, std::nullopt}).isSuccess());
+    CHECK(driver->system()->pause().isSuccess());
+    sim::advanceTime(31ULL * 60 * 1000);
+    std::this_thread::sleep_for(100ms);
+    CHECK(!sim::pinLevel(ENABLE_PIN));
+    CHECK(driver->motion()->getPosition(&referenced).has_value());
+    CHECK(referenced);
+    CHECK(driver->system()->resume().isSuccess());
+
+    // --- 31 minuti di inattivita' da fermi: motori spenti, riaccesi dal comando successivo ---
+    CHECK(driver->system()->endPrint().isSuccess());
+    sim::advanceTime(31ULL * 60 * 1000);
+    CHECK(waitFor([&] { return sim::pinLevel(ENABLE_PIN); }, 2s));
+    CHECK(driver->motion()->getPosition(&referenced).has_value());
+    CHECK(!referenced);
+    CHECK(!sim::pinLevel(ENABLE_PIN));
 }
 
 static void testFullPrintJob() {
@@ -1206,6 +1325,8 @@ int main() {
             {"queue pause and stop on fault",      testQueueStopsOnFault},
             {"homing and endstops",                testHomingAndEndstops},
             {"full print job from file",           testFullPrintJob},
+            {"software travel limits",             testTravelLimits},
+            {"motor enable pin",                   testMotorEnable},
             {"pause, park and resume",             testPauseAndResume},
             {"recover after link fault",           testRecoverAfterLinkFault},
             {"recover after firmware reboot",      testRecoverAfterFirmwareReboot},
