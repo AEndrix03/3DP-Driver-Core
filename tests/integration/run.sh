@@ -21,6 +21,14 @@ fi
 mkdir -p "$BUILD_DIR/fw" "$BUILD_DIR/drv" "$BUILD_DIR/work"
 objects=()
 
+# Un header modificato in uno dei due repo fa ricompilare tutto (niente oggetti incoerenti)
+stamp="$BUILD_DIR/.headers"
+newest_header="$(find "$DRIVER_DIR/include" "$FIRMWARE_DIR/src" "$FIRMWARE_DIR/test/native"     \( -name '*.hpp' -o -name '*.h' \) -newer "$stamp" -print -quit 2>/dev/null || true)"
+if [ ! -f "$stamp" ] || [ -n "$newest_header" ]; then
+    REBUILD=1
+    touch "$stamp"
+fi
+
 compile() { # <src> <obj> <flags...>
     local src="$1" obj="$2"
     shift 2

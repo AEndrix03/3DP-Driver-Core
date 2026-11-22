@@ -57,11 +57,11 @@ namespace core::command::motion {
         return sendCommand('M', 99, params);
     }
 
-    std::optional<position::Position> MotionCommands::getPosition() {
+    std::optional<position::Position> MotionCommands::getPosition(bool *referenced) {
         auto result = sendCommand('M', 114, {});
         if (!result.isSuccess()) return std::nullopt;
 
-        // Risposta del firmware: "CRT POS <x> <y> <z>"
+        // Risposta del firmware: "CRT POS <x> <y> <z> <riferita 0/1>"
         for (const auto &line: result.body) {
             std::istringstream iss(line);
             std::string token;
@@ -71,6 +71,8 @@ namespace core::command::motion {
 
             position::Position pos{};
             if (iss >> pos.x >> pos.y >> pos.z) {
+                int flag = 0;
+                if (referenced) *referenced = (iss >> flag) && flag != 0;
                 return pos;
             }
         }

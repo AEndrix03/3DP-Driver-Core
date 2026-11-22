@@ -116,6 +116,23 @@ namespace core {
             return std::nullopt;
         }
 
+        /**
+         * @brief Campo "D<numero>" di una risposta OK (ultimo comando completato).
+         */
+        static std::optional<uint32_t> fetchCompletedNumber(const SerialMessage &message) {
+            std::istringstream iss(message.payload);
+            std::string token;
+            while (iss >> token) {
+                if (token.size() > 1 && token[0] == 'D') {
+                    try {
+                        return static_cast<uint32_t>(std::stoul(token.substr(1)));
+                    } catch (const std::exception &) {
+                    }
+                }
+            }
+            return std::nullopt;
+        }
+
     private:
         std::shared_ptr<SerialPort> serialPort_;
         mutable std::mutex protocolMutex_;

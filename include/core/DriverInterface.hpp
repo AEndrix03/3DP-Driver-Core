@@ -19,6 +19,7 @@
 #include <vector>
 #include <mutex>
 #include <atomic>
+#include <chrono>
 #include <string>
 
 namespace core {
@@ -74,6 +75,21 @@ namespace core {
 
         std::shared_ptr<CommandExecutor> executor() const { return commandExecutor_; }
 
+        /// Numero dell'ultimo comando inviato con successo.
+        uint32_t lastIssuedCommand() const { return lastIssued_.load(); }
+
+        /// Numero dell'ultimo comando che il firmware ha finito di eseguire.
+        uint32_t lastCompletedCommand() const { return lastCompleted_.load(); }
+
+        /// Cambia a ogni risincronizzazione: i numeri comando ripartono da 1.
+        uint32_t sequenceEpoch() const { return sequenceEpoch_.load(); }
+
+        /**
+         * @brief Attende che il firmware abbia eseguito tutti i movimenti in coda.
+         * @return false su timeout o guasto
+         */
+        bool waitForIdle(std::chrono::milliseconds timeout = std::chrono::minutes(10));
+
     private:
         std::shared_ptr<Printer> printer_;
         std::shared_ptr<SerialPort> serialPort_;
@@ -86,6 +102,9 @@ namespace core {
         mutable std::atomic<uint64_t> faultEpoch_{0};
         mutable std::atomic<bool> linkFault_{false};
         mutable std::string lastFaultReason_;
+        mutable std::atomic<uint32_t> lastIssued_{0};
+        mutable std::atomic<uint32_t> lastCompleted_{0};
+        mutable std::atomic<uint32_t> sequenceEpoch_{0};
 
         /// Handshake "N0 S10": riallinea numerazione e stato. Richiede commandMutex_.
         bool resyncLocked() const;

@@ -28,6 +28,10 @@ namespace core::types {
         std::optional<uint32_t> commandNumber;
         std::vector<std::string> body;
 
+        /// "D" della risposta OK: ultimo comando la cui esecuzione e' terminata sul firmware.
+        /// I movimenti rispondono OK appena sono in coda, quindi puo' essere minore di commandNumber.
+        std::optional<uint32_t> completedNumber = std::nullopt;
+
         inline bool isSuccess() const {
             return code == ResultCode::Success;
         }

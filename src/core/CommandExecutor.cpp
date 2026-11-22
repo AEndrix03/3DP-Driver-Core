@@ -129,6 +129,9 @@ namespace core {
                     result.message = "Command too long for firmware buffer";
                     return result;
                 case MessageCodeType::RESEND_COMMAND_ERROR:
+                    // Al comando di sincronizzazione (N0) il firmware non risponde mai E04:
+                    // e' la risposta rimasta in coda di un comando precedente al riavvio.
+                    if (expectedNumber == 0) continue;
                     result.code = types::ResultCode::Resend;
                     result.commandNumber = number;
                     result.message = "Firmware expects N" + (number ? std::to_string(*number) : std::string("?"));
@@ -147,6 +150,7 @@ namespace core {
                 case MessageCodeType::OK:
                     result.code = types::ResultCode::Success;
                     result.message = "Command acknowledged";
+                    result.completedNumber = SerialProtocolHandler::fetchCompletedNumber(message);
                     break;
                 case MessageCodeType::DUPLICATE_COMMAND_ERROR:
                     // gia' eseguito: era andata persa solo la risposta

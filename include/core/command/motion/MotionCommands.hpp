@@ -49,7 +49,12 @@ namespace core::command::motion {
 
         types::Result diagnoseAxis(const std::string &axis, float feedrate);
 
-        std::optional<position::Position> getPosition();
+        /**
+         * @brief Posizione reale in questo istante (non attende la fine dei movimenti).
+         * @param referenced se non nullo: true se il firmware ha un riferimento valido
+         *        (homing o G92 dall'accensione); false dopo un riavvio.
+         */
+        std::optional<position::Position> getPosition(bool *referenced = nullptr);
 
     };
 

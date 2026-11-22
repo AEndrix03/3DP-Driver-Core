@@ -7,6 +7,7 @@
 #include "logger/Logger.hpp"
 #include <chrono>
 #include <mutex>
+#include <thread>
 
 namespace core {
 
@@ -105,6 +106,24 @@ namespace core {
         }
     }
 
+    bool DriverInterface::waitForIdle(std::chrono::milliseconds timeout) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        const uint64_t epoch = faultEpoch();
+
+        while (std::chrono::steady_clock::now() < deadline) {
+            // Un comando di stato non entra nella coda dei movimenti: quando il suo
+            // "D" coincide col suo numero, il firmware e' fermo.
+            const types::Result result = sendCommandInternal('S', 10, {});
+            if (!result.isSuccess() || faultEpoch() != epoch) return false;
+            if (result.completedNumber && result.commandNumber &&
+                *result.completedNumber == *result.commandNumber) {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        }
+        return false;
+    }
+
     void DriverInterface::applyStateAfterSuccess(char category, int code) const {
         auto *self = const_cast<DriverInterface *>(this);
         if (category != 'S') return;
@@ -140,6 +159,9 @@ namespace core {
 
         commandContext_->setCommandNumber(1);
         linkFault_ = false;
+        lastIssued_ = 0;
+        lastCompleted_ = 0;
+        sequenceEpoch_.fetch_add(1);
 
         auto *self = const_cast<DriverInterface *>(this);
         for (const auto &line: result.body) {
@@ -182,10 +204,13 @@ namespace core {
             switch (result.code) {
                 case types::ResultCode::Success:
                     applyStateAfterSuccess(category, code);
+                    lastIssued_ = cmdNum;
+                    if (result.completedNumber) lastCompleted_ = *result.completedNumber;
                     break;
                 case types::ResultCode::Duplicate:
-                    // Eseguito, ma la risposta (e gli eventuali dati) sono andati persi
+                    // Eseguito (o accodato), ma la risposta e gli eventuali dati sono andati persi
                     applyStateAfterSuccess(category, code);
+                    lastIssued_ = cmdNum;
                     result.code = types::ResultCode::Success;
                     break;
                 case types::ResultCode::Rejected:

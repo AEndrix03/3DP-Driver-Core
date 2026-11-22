@@ -23,6 +23,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <iostream>
 #include <mutex>
@@ -187,9 +188,15 @@ static void fastTiming() {
 static void normalize() {
     sim::setTimeScale(1.0);
     driver->system()->clearError();
+    driver->waitForIdle(60s);
     driver->system()->endPrint();
     driver->motion()->setPosition({0.0, 0.0, 0.0, std::nullopt, std::nullopt});
     sim::resetSteps();
+}
+
+/// I movimenti rispondono OK appena accodati: attende che siano stati eseguiti.
+static bool idle() {
+    return driver->waitForIdle(60s);
 }
 
 static bool waitFor(const std::function<bool()> &condition, std::chrono::milliseconds timeout) {
@@ -234,8 +241,9 @@ static void testStraightLine() {
 
     sim::recordPath(true);
     const auto result = driver->motion()->moveAbsolute({20.0, 5.0, std::nullopt, std::nullopt, 3000.0});
-    sim::recordPath(false);
     CHECK_MSG(result.isSuccess(), result.message);
+    CHECK(idle());
+    sim::recordPath(false);
 
     const auto steps = sim::steps();
     CHECK(steps.x == 1600);
@@ -257,6 +265,7 @@ static void testStraightLine() {
 
     // Asse omesso = invariato (prima veniva inviato -1)
     CHECK(driver->motion()->moveAbsolute({10.0, std::nullopt, std::nullopt, std::nullopt, 3000.0}).isSuccess());
+    CHECK(idle());
     CHECK(sim::steps().x == 800);
     CHECK(sim::steps().y == 400);
 }
@@ -268,6 +277,7 @@ static void testLongZBeyond16Bit() {
     sim::setTimeScale(20.0); // 90 mm a 150 mm/min = 36 s simulati
     const auto result = driver->motion()->moveAbsolute({std::nullopt, std::nullopt, 90.0, std::nullopt, 150.0});
     CHECK_MSG(result.isSuccess(), result.message);
+    CHECK(idle());
     CHECK(sim::steps().z == 36000); // con "int" a 16 bit andava in overflow a 81,9 mm
 
     const auto position = driver->motion()->getPosition();
@@ -288,11 +298,13 @@ static void testExtrusionRemainder() {
             break;
         }
     }
+    CHECK(idle());
     CHECK_MSG(sim::steps().e == 168, "E steps: " + std::to_string(sim::steps().e));
 
     // Estrusione coordinata con XY
     sim::resetSteps();
     CHECK(driver->motion()->moveRelative({10.0, std::nullopt, std::nullopt, 0.5, 1800.0}).isSuccess());
+    CHECK(idle());
     CHECK(sim::steps().x == 800);
     CHECK(sim::steps().e == 40);
 }
@@ -306,8 +318,9 @@ static void testLostResponse() {
     const auto result = driver->motion()->moveRelative({1.0, std::nullopt, std::nullopt, std::nullopt, 3000.0});
 
     CHECK_MSG(result.isSuccess(), result.message);
+    CHECK(idle());
     CHECK(sim::steps().x == 80);                        // eseguito una volta sola
-    CHECK(port->commandsSent() - sentBefore == 2);       // ritrasmesso
+    CHECK(port->commandsSent() - sentBefore >= 2);       // ritrasmesso
     CHECK(!driver->isLinkFaulted());
 
     CHECK(driver->system()->printStatus().isSuccess()); // la sequenza prosegue
@@ -320,11 +333,13 @@ static void testLostAndCorruptedCommand() {
     port->corruptNextCommands(1);
     auto result = driver->motion()->moveRelative({1.0, std::nullopt, std::nullopt, std::nullopt, 3000.0});
     CHECK_MSG(result.isSuccess(), result.message);
+    CHECK(idle());
     CHECK(sim::steps().x == 80);
 
     port->dropNextCommands(1);
     result = driver->motion()->moveRelative({1.0, std::nullopt, std::nullopt, std::nullopt, 3000.0});
     CHECK_MSG(result.isSuccess(), result.message);
+    CHECK(idle());
     CHECK(sim::steps().x == 160);
 }
 
@@ -365,14 +380,14 @@ static void testFirmwareRebootDuringMove() {
     normalize();
     CHECK(driver->system()->startPrint().isSuccess());
 
-    core::types::Result result;
-    std::thread mover([&] {
-        result = driver->motion()->moveRelative({100.0, std::nullopt, std::nullopt, std::nullopt, 1000.0});
-    });
-    std::this_thread::sleep_for(400ms);
+    // Il movimento e' in coda sul firmware quando questo si riavvia (watchdog)
+    CHECK(driver->motion()->moveRelative({100.0, std::nullopt, std::nullopt, std::nullopt, 1000.0}).isSuccess());
+    std::this_thread::sleep_for(300ms);
     sim::reboot(4 /* hal::RESET_WATCHDOG */);
-    mover.join();
+    std::this_thread::sleep_for(200ms);
 
+    // Il primo comando successivo scopre il riavvio invece di proseguire alla cieca
+    const auto result = driver->motion()->moveRelative({1.0, std::nullopt, std::nullopt, std::nullopt, 1000.0});
     CHECK(result.isSyncLost());
     CHECK_MSG(result.message.find("WDT") != std::string::npos, result.message);
     CHECK(driver->isLinkFaulted());
@@ -382,6 +397,11 @@ static void testFirmwareRebootDuringMove() {
     CHECK_MSG(status.isSuccess(), status.message);
     CHECK(contains(status, "STA Idle"));
     CHECK(driver->getState() == core::PrintState::Idle);
+
+    // ...e sa che la posizione non ha piu' un riferimento valido
+    bool referenced = true;
+    CHECK(driver->motion()->getPosition(&referenced).has_value());
+    CHECK(!referenced);
 }
 
 static void testSequenceBeyond16Bit() {
@@ -404,25 +424,28 @@ static void testAbortMotion() {
     normalize();
     CHECK(driver->system()->startPrint().isSuccess());
 
-    core::types::Result result;
+    // Tre segmenti in coda, 15 s di movimento in tutto
+    for (int i = 0; i < 3; ++i) {
+        CHECK(driver->motion()->moveRelative({50.0, std::nullopt, std::nullopt, std::nullopt, 600.0}).isSuccess());
+    }
+    std::this_thread::sleep_for(400ms);
     const auto start = std::chrono::steady_clock::now();
-    std::thread mover([&] {
-        result = driver->motion()->moveRelative({150.0, std::nullopt, std::nullopt, std::nullopt, 600.0}); // 15 s
-    });
-    std::this_thread::sleep_for(300ms);
     driver->abortMotion();
-    mover.join();
-    const auto elapsed = std::chrono::steady_clock::now() - start;
+    CHECK(driver->waitForIdle(3s));
+    CHECK(std::chrono::steady_clock::now() - start < 2s);
 
-    CHECK(elapsed < 2s);
-    CHECK(result.isRejected());
-    CHECK_MSG(result.message.find("ABORTED") != std::string::npos, result.message);
-    CHECK(sim::steps().x > 0 && sim::steps().x < 12000);
+    const long stopped = sim::steps().x;
+    CHECK(stopped > 0 && stopped < 4000); // fermato nel primo segmento, la coda e' stata scartata
     CHECK(!driver->isLinkFaulted());
 
-    // La posizione riportata coincide con gli step realmente fatti
+    // Arresto in decelerazione: la posizione riportata coincide con gli step fatti...
     const auto position = driver->motion()->getPosition();
-    CHECK(position && std::fabs(position->x * 80.0 - sim::steps().x) < 1.0);
+    CHECK(position && std::fabs(position->x * 80.0 - stopped) < 0.5);
+
+    // ...e il movimento successivo riparte esattamente da li'
+    CHECK(driver->motion()->moveAbsolute({0.0, std::nullopt, std::nullopt, std::nullopt, 3000.0}).isSuccess());
+    CHECK(idle());
+    CHECK(sim::steps().x == 0);
 }
 
 static void testThermal() {
@@ -519,6 +542,7 @@ static void testLongRunningClocks() {
     sim::jumpNearMillisRollover(500);
     auto result = driver->motion()->moveRelative({40.0, std::nullopt, std::nullopt, std::nullopt, 2400.0}); // ~1 s
     CHECK_MSG(result.isSuccess(), result.message);
+    CHECK(idle());
     CHECK(sim::steps().x == 3200);
 
     power = driver->sendCommandInternal('S', 8, {});
@@ -529,10 +553,87 @@ static void testLongRunningClocks() {
     sim::jumpNearMicrosRollover(300000);
     const auto start = std::chrono::steady_clock::now();
     result = driver->motion()->moveRelative({40.0, std::nullopt, std::nullopt, std::nullopt, 2400.0});
+    CHECK(idle());
     const auto elapsed = std::chrono::steady_clock::now() - start;
     CHECK_MSG(result.isSuccess(), result.message);
     CHECK(sim::steps().x == 3200);
     CHECK(elapsed > 800ms && elapsed < 3s); // ne' bloccato ne' "raffica" di step
+}
+
+/// Velocita' (step/s) programmate dal firmware, una per step.
+static std::vector<double> recordedRates() {
+    std::vector<double> rates;
+    for (uint16_t ticks: sim::intervals()) rates.push_back(2000000.0 / ticks);
+    return rates;
+}
+
+static void testLookahead() {
+    normalize();
+    CHECK(driver->system()->startPrint().isSuccess());
+
+    // --- 60 segmenti collineari da 1 mm a 60 mm/s: devono fondersi in un unico movimento ---
+    sim::recordIntervals(true);
+    for (int i = 1; i <= 60; ++i) {
+        const auto result = driver->motion()->moveAbsolute(
+                {static_cast<double>(i), std::nullopt, std::nullopt, std::nullopt, 3600.0});
+        if (!result.isSuccess()) {
+            CHECK_MSG(false, result.message);
+            break;
+        }
+    }
+    CHECK(idle());
+    sim::recordIntervals(false);
+    CHECK(sim::steps().x == 4800);
+
+    auto rates = recordedRates();
+    CHECK(rates.size() >= 4700);
+    if (rates.size() >= 4700) {
+        // A regime (terzo centrale) la velocita' resta quella nominale: nessuna frenata tra i segmenti.
+        // Senza lookahead ogni segmento da 1 mm ripartirebbe da fermo senza mai superare ~30 mm/s.
+        double slowest = 1e9, fastest = 0.0;
+        for (size_t i = rates.size() / 3; i < rates.size() * 2 / 3; ++i) {
+            slowest = std::min(slowest, rates[i]);
+            fastest = std::max(fastest, rates[i]);
+        }
+        CHECK_MSG(slowest > 4500.0, "slowest mid-path rate " + std::to_string(slowest));
+        CHECK_MSG(fastest < 4810.0, "fastest rate " + std::to_string(fastest));
+
+        // Mai oltre l'accelerazione configurata (1000 mm/s^2 = 80000 step/s^2).
+        // Misurata su finestre di 16 step: il singolo intervallo e' quantizzato in tick di timer.
+        double worst = 0.0;
+        for (size_t i = 0; i + 16 < rates.size(); ++i) {
+            double dt = 0.0;
+            for (size_t k = i; k < i + 16; ++k) dt += 1.0 / rates[k];
+            worst = std::max(worst, std::fabs(rates[i + 16] - rates[i]) / dt);
+        }
+        CHECK_MSG(worst < 80000.0 * 1.10, "peak acceleration (steps/s^2) " + std::to_string(worst));
+
+        // Partenza e arrivo dolci
+        CHECK(rates.front() < 600.0);
+        CHECK(rates.back() < 600.0);
+    }
+
+    // --- spigolo: la velocita' di giunzione dipende dall'angolo ---
+    const auto cornerMinimum = [&](double x2, double y2) {
+        normalize();
+        driver->system()->startPrint();
+        sim::recordIntervals(true);
+        driver->motion()->moveAbsolute({30.0, 0.0, std::nullopt, std::nullopt, 3600.0});
+        driver->motion()->moveAbsolute({x2, y2, std::nullopt, std::nullopt, 3600.0});
+        idle();
+        sim::recordIntervals(false);
+        const auto r = recordedRates();
+        double minimum = 1e9;
+        for (size_t i = 1600; i < r.size() && i < 3400; ++i) minimum = std::min(minimum, r[i]);
+        return minimum;
+    };
+
+    const double gentle = cornerMinimum(55.98, 15.0); // deviazione di 30 gradi
+    const double sharp = cornerMinimum(30.0, 30.0);   // 90 gradi
+    CHECK_MSG(gentle > 1500.0, "30 degree corner rate " + std::to_string(gentle)); // attraversato in velocita'
+    CHECK_MSG(sharp < 900.0, "90 degree corner rate " + std::to_string(sharp));    // quasi fermo
+    CHECK(gentle > sharp * 2.0);
+    CHECK(sim::steps().x == 2400 && sim::steps().y == 2400);
 }
 
 static void testGeometry() {
@@ -608,7 +709,7 @@ static void testGCodeTranslation() {
     const auto run = [&](const std::string &line) {
         try {
             translator->parseLine(line);
-            return true;
+            return idle();
         } catch (const std::exception &e) {
             std::printf("    gcode '%s' threw: %s\n", line.c_str(), e.what());
             return false;
@@ -698,6 +799,7 @@ static void testQueueStopsOnFault() {
 
     queue.setPaused(false);
     CHECK(waitFor([&] { return finished.load() == 1; }, 10s));
+    CHECK(idle());
     CHECK(sim::steps().x == 2400); // tutti e 30 i movimenti eseguiti
     CHECK(faults.load() == 0);
 
@@ -751,6 +853,7 @@ int main() {
             {"firmware reboot during move",        testFirmwareRebootDuringMove},
             {"command number beyond 16 bit",       testSequenceBeyond16Bit},
             {"motion abort",                       testAbortMotion},
+            {"lookahead and speed profile",        testLookahead},
             {"thermal control and protections",    testThermal},
             {"18h / millis / micros rollover",     testLongRunningClocks},
             {"arc and spline flattening",          testGeometry},
