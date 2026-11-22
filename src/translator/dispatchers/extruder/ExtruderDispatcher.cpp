@@ -22,8 +22,8 @@ namespace translator::gcode {
 
     void ExtruderDispatcher::handle(const std::string &command, const std::map<std::string, double> &params) {
         auto &stateTracker = core::state::StateTracker::getInstance();
-        float length = params.count("L") ? params.at("L") : 5.0f;
-        float feedrate = params.count("F") ? params.at("F") : 300.0f;
+        const double length = params.count("L") ? params.at("L") : 5.0;
+        const double feedrate = params.count("F") ? params.at("F") : 300.0;
         if (command == "G10") {
             // Retract
             auto result = driver_->extruder()->retract(length, feedrate);

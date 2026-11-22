@@ -24,7 +24,7 @@ namespace core {
          * @return Comando formattato con checksum.
          */
         static std::string
-        buildCommand(uint16_t number, char category, int code, const std::vector<std::string> &params);
+        buildCommand(uint32_t number, char category, int code, const std::vector<std::string> &params);
 
     private:
         static uint8_t computeChecksum(const std::string &data);

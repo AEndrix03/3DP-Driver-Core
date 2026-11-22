@@ -1,9 +1,23 @@
-#include <regex>
 #include "core/command/motion/MotionCommands.hpp"
 #include "core/DriverInterface.hpp"
 #include "core/utils/FloatFormatter.hpp"
+#include <sstream>
 
 namespace core::command::motion {
+    namespace {
+        // X/Y/Z a 3 decimali (risoluzione meccanica 0.0125 mm), E a 4: il firmware
+        // riporta il resto frazionario, quindi nessuna deriva di estrusione.
+        std::vector<std::string> buildParams(const MoveTarget &t) {
+            std::vector<std::string> params;
+            if (t.x) params.push_back("X" + utils::formatFloat(*t.x, 3));
+            if (t.y) params.push_back("Y" + utils::formatFloat(*t.y, 3));
+            if (t.z) params.push_back("Z" + utils::formatFloat(*t.z, 3));
+            if (t.e) params.push_back("E" + utils::formatFloat(*t.e, 4));
+            if (t.feedrate) params.push_back("F" + utils::formatFloat(*t.feedrate, 0));
+            return params;
+        }
+    }
+
     MotionCommands::MotionCommands(DriverInterface *driver)
         : CommandCategoryInterface(driver) {
     }
@@ -12,56 +26,55 @@ namespace core::command::motion {
         return sendCommand('M', 0, {});
     }
 
+    types::Result MotionCommands::moveRelative(const MoveTarget &target) {
+        return sendCommand('M', 10, buildParams(target));
+    }
+
+    types::Result MotionCommands::moveAbsolute(const MoveTarget &target) {
+        return sendCommand('M', 11, buildParams(target));
+    }
+
+    types::Result MotionCommands::setPosition(const MoveTarget &position) {
+        MoveTarget p = position;
+        p.e.reset();
+        p.feedrate.reset();
+        return sendCommand('M', 12, buildParams(p));
+    }
+
     types::Result MotionCommands::moveTo(float x, float y, float z, float feedrate) {
-        std::vector<std::string> params = {
-            "X" + utils::formatFloat(x),
-            "Y" + utils::formatFloat(y),
-            "Z" + utils::formatFloat(z),
-            "F" + utils::formatFloat(feedrate)
-        };
-        return sendCommand('M', 10, params);
+        return moveRelative({x, y, z, std::nullopt, feedrate});
+    }
+
+    types::Result MotionCommands::goTo(float x, float y, float z, float feedrate) {
+        return moveAbsolute({x, y, z, std::nullopt, feedrate});
     }
 
     types::Result MotionCommands::diagnoseAxis(const std::string &axis, float feedrate) {
         std::vector<std::string> params = {
             axis,
-            "F" + utils::formatFloat(feedrate)
+            "F" + utils::formatFloat(feedrate, 0)
         };
         return sendCommand('M', 99, params);
-    }
-
-    types::Result MotionCommands::goTo(float x, float y, float z, float feedrate) {
-        std::vector<std::string> params = {
-            "X" + utils::formatFloat(x),
-            "Y" + utils::formatFloat(y),
-            "Z" + utils::formatFloat(z),
-            "F" + utils::formatFloat(feedrate)
-        };
-        return sendCommand('M', 11, params);
     }
 
     std::optional<position::Position> MotionCommands::getPosition() {
         auto result = sendCommand('M', 114, {});
         if (!result.isSuccess()) return std::nullopt;
 
-        position::Position pos;
-        std::regex rxX(R"(X=([-]?[0-9]*\.?[0-9]+))");
-        std::regex rxY(R"(Y=([-]?[0-9]*\.?[0-9]+))");
-        std::regex rxZ(R"(Z=([-]?[0-9]*\.?[0-9]+))");
-        std::smatch match;
-
+        // Risposta del firmware: "CRT POS <x> <y> <z>"
         for (const auto &line: result.body) {
-            if (std::regex_search(line, match, rxX)) {
-                pos.x = std::stod(match[1]);
-            }
-            if (std::regex_search(line, match, rxY)) {
-                pos.y = std::stod(match[1]);
-            }
-            if (std::regex_search(line, match, rxZ)) {
-                pos.z = std::stod(match[1]);
+            std::istringstream iss(line);
+            std::string token;
+            iss >> token;
+            if (token == "CRT") iss >> token;
+            if (token != "POS") continue;
+
+            position::Position pos{};
+            if (iss >> pos.x >> pos.y >> pos.z) {
+                return pos;
             }
         }
 
-        return pos;
+        return std::nullopt;
     }
 } // namespace core::command::motion

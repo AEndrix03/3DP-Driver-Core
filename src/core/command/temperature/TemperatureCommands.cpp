@@ -4,111 +4,63 @@
 #include "core/utils/FloatFormatter.hpp"
 #include "core/printer/state/StateTracker.hpp"
 #include "logger/Logger.hpp"
+#include <sstream>
 
 namespace core::command::temperature {
     TemperatureCommands::TemperatureCommands(DriverInterface *driver)
             : CommandCategoryInterface(driver) {
     }
 
+    namespace {
+        /// Estrae "<attuale> <target>" dalla riga "CRT TMP <attuale> <target>"
+        bool parseTemperature(const types::Result &result, double &current, double &target) {
+            for (const auto &line: result.body) {
+                std::istringstream iss(line);
+                std::string token;
+                iss >> token;
+                if (token == "CRT") iss >> token;
+                if (token != "TMP") continue;
+                if (iss >> current >> target) return true;
+            }
+            return false;
+        }
+    }
+
     types::Result TemperatureCommands::setHotendTemperature(int temperature) {
-        std::vector<std::string> params = {
-                "S" + std::to_string(temperature)
-        };
-        auto result = sendCommand('T', 10, params);
+        // Firmware: T10 S<gradi>. La regolazione avviene sul firmware.
+        auto result = sendCommand('T', 10, {"S" + std::to_string(temperature)});
 
         if (result.isSuccess()) {
-            auto &stateTracker = state::StateTracker::getInstance();
-            stateTracker.setHotendTargetTemp(temperature);
+            state::StateTracker::getInstance().setHotendTargetTemp(temperature);
         }
 
         return result;
     }
 
     types::Result TemperatureCommands::setBedTemperature(int temperature) {
-        std::vector<std::string> params = {
-                "S" + std::to_string(temperature)
-        };
-        auto result = sendCommand('T', 20, params);
-
-        if (result.isSuccess()) {
-            auto &stateTracker = state::StateTracker::getInstance();
-            stateTracker.setBedTargetTemp(temperature);
+        // Il firmware non gestisce un piano riscaldato: nessun comando viene inviato.
+        if (temperature > 0) {
+            Logger::logWarning("[TemperatureCommands] Heated bed not supported by firmware - M140/M190 ignored");
         }
-
-        return result;
+        return types::Result::success("Heated bed not supported");
     }
 
     types::Result TemperatureCommands::getHotendTemperature() {
-        // T11 command gets hotend temperature
-        auto result = sendCommand('T', 11, {});
+        // Firmware: T20 -> "CRT TMP <attuale> <target>"
+        auto result = sendCommand('T', 20, {});
 
-        if (result.isSuccess() && !result.body.empty()) {
-            try {
-                // Parse temperature from response body
-                for (const auto &line: result.body) {
-                    // Look for TEMP= pattern
-                    size_t pos = line.find("TEMP=");
-                    if (pos != std::string::npos) {
-                        std::string tempStr = line.substr(pos + 5);
-                        size_t endPos = tempStr.find(' ');
-                        if (endPos != std::string::npos) {
-                            tempStr = tempStr.substr(0, endPos);
-                        }
-
-                        double temp = std::stod(tempStr);
-                        auto &stateTracker = state::StateTracker::getInstance();
-                        stateTracker.updateHotendActualTemp(temp);
-
-                        Logger::logInfo("[TemperatureCommands] Hotend temp: " + std::to_string(temp) + "°C");
-
-                        // Add the parsed temperature to the result
-                        result.body.clear();
-                        result.body.push_back("T:" + std::to_string(temp));
-                        break;
-                    }
-                }
-            } catch (const std::exception &e) {
-                Logger::logError("[TemperatureCommands] Failed to parse hotend temperature: " + std::string(e.what()));
-            }
+        double current = 0.0, target = 0.0;
+        if (result.isSuccess() && parseTemperature(result, current, target)) {
+            state::StateTracker::getInstance().updateHotendActualTemp(current);
+            result.body.clear();
+            result.body.push_back("T:" + std::to_string(current));
+            result.body.push_back("TARGET:" + std::to_string(target));
         }
 
         return result;
     }
 
     types::Result TemperatureCommands::getBedTemperature() {
-        // T21 command gets bed temperature
-        auto result = sendCommand('T', 21, {});
-
-        if (result.isSuccess() && !result.body.empty()) {
-            try {
-                // Parse temperature from response body
-                for (const auto &line: result.body) {
-                    // Look for TEMP= pattern
-                    size_t pos = line.find("TEMP=");
-                    if (pos != std::string::npos) {
-                        std::string tempStr = line.substr(pos + 5);
-                        size_t endPos = tempStr.find(' ');
-                        if (endPos != std::string::npos) {
-                            tempStr = tempStr.substr(0, endPos);
-                        }
-
-                        double temp = std::stod(tempStr);
-                        auto &stateTracker = state::StateTracker::getInstance();
-                        stateTracker.updateBedActualTemp(temp);
-
-                        Logger::logInfo("[TemperatureCommands] Bed temp: " + std::to_string(temp) + "°C");
-
-                        // Add the parsed temperature to the result
-                        result.body.clear();
-                        result.body.push_back("T:" + std::to_string(temp));
-                        break;
-                    }
-                }
-            } catch (const std::exception &e) {
-                Logger::logError("[TemperatureCommands] Failed to parse bed temperature: " + std::string(e.what()));
-            }
-        }
-
-        return result;
+        return types::Result::error("Heated bed not supported");
     }
 } // namespace core::command::temperature

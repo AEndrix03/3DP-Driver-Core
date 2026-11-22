@@ -13,17 +13,17 @@ namespace core::command::extruder {
 
     types::Result ExtruderCommands::extrude(float millimeters, float feedrate) {
         std::vector<std::string> params = {
-            "E" + utils::formatFloat(millimeters),
-            "F" + utils::formatFloat(feedrate)
+            "E" + utils::formatFloat(millimeters, 4),
+            "F" + utils::formatFloat(feedrate, 0)
         };
         return sendCommand('A', 10, params);
     }
 
     types::Result ExtruderCommands::retract(float millimeters, float feedrate) {
         std::vector<std::string> params = {
-            "E" + utils::formatFloat(millimeters),
-            "F" + utils::formatFloat(feedrate)
+            "E" + utils::formatFloat(millimeters, 4),
+            "F" + utils::formatFloat(feedrate, 0)
         };
-        return sendCommand('A', 20, params);
+        return sendCommand('A', 11, params);
     }
 } // namespace core::command::extruder

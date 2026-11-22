@@ -73,16 +73,12 @@ namespace core {
             Logger::logWarning("[SerialPort] Failed to set stop bits: " + ec.message());
         }
 
-        // Set flow control (hardware - important for DTR)
+        // Nessun flow control: Arduino non ha RTS/CTS (il reset via DTR non dipende da questo).
+        // Con il flow control hardware un CTS non pilotato puo' bloccare le scritture.
         serial_port_->set_option(boost::asio::serial_port_base::flow_control(
-                boost::asio::serial_port_base::flow_control::hardware), ec);
+                boost::asio::serial_port_base::flow_control::none), ec);
         if (ec) {
-            // Try without hardware flow control if it fails
-            serial_port_->set_option(boost::asio::serial_port_base::flow_control(
-                    boost::asio::serial_port_base::flow_control::none), ec);
-            if (ec) {
-                Logger::logWarning("[SerialPort] Failed to set flow control: " + ec.message());
-            }
+            Logger::logWarning("[SerialPort] Failed to set flow control: " + ec.message());
         }
     }
 
@@ -184,6 +180,9 @@ namespace core {
             return;
         }
 
+        // Le scritture possono arrivare da piu' thread (comandi, ACK, abort)
+        std::lock_guard<std::mutex> lock(writeMutex_);
+
         std::string message = data + "\n";
         boost::system::error_code ec;
 
@@ -203,72 +202,74 @@ namespace core {
         Logger::logInfo("[TX] " + data);
     }
 
+    bool RealSerialPort::extractLine(std::string &line) {
+        size_t pos;
+        while ((pos = buffer_.find('\n')) != std::string::npos) {
+            line = buffer_.substr(0, pos);
+            buffer_.erase(0, pos + 1);
+
+            if (!line.empty() && line.back() == '\r') {
+                line.pop_back();
+            }
+            if (!line.empty()) {
+                Logger::logInfo("[RX] " + line);
+                return true;
+            }
+        }
+        return false;
+    }
+
     std::string RealSerialPort::receiveLine() {
         if (!serial_port_ || !serial_port_->is_open()) {
             return "";
         }
 
-        boost::system::error_code ec;
+        // Una lettura precedente puo' aver gia' portato nel buffer piu' di una riga
         std::string line;
-
-        try {
-            static int timeoutCount = 0;
-            boost::asio::steady_timer timer(io_context_);
-            timer.expires_after(std::chrono::milliseconds(500));
-
-            bool timeout = false;
-            timer.async_wait([&](const boost::system::error_code &) {
-                timeout = true;
-                timeoutCount++;
-                serial_port_->cancel();
-            });
-
-            boost::asio::read_until(*serial_port_, boost::asio::dynamic_buffer(buffer_), '\n', ec);
-            timer.cancel();
-
-            if (timeout) {
-                if (timeoutCount % 100 == 0) {
-                    Logger::logWarning("[SerialPort] " + std::to_string(timeoutCount) + " timeouts occurred");
-                }
-                return "";
-            }
-
-            timeoutCount = 0;
-
-            if (ec) {
-                if (ec != boost::asio::error::operation_aborted) {
-                    Logger::logError("[SerialPort] Read error: " + ec.message());
-
-                    if (ec == boost::asio::error::broken_pipe ||
-                        ec == boost::asio::error::connection_reset) {
-                        Logger::logError("[SerialPort] Connection lost - attempting recovery");
-                        return "CONN_LOST";
-                    }
-                }
-                return "";
-            }
-
-            // Extract line from buffer
-            auto pos = buffer_.find('\n');
-            if (pos != std::string::npos) {
-                line = buffer_.substr(0, pos);
-                buffer_.erase(0, pos + 1);
-
-                if (!line.empty() && line.back() == '\r') {
-                    line.pop_back();
-                }
-
-                if (!line.empty()) {
-                    Logger::logInfo("[RX] Received: " + line);
-                }
-            }
-
-        } catch (const std::exception &e) {
-            Logger::logError("[SerialPort] Exception: " + std::string(e.what()));
-            return "SERIAL_ERROR";
+        if (extractLine(line)) {
+            return line;
         }
 
-        return line;
+        constexpr auto READ_TIMEOUT = std::chrono::milliseconds(500);
+
+        try {
+            boost::system::error_code readError = boost::asio::error::would_block;
+            bool timedOut = false;
+
+            // Lettura asincrona + timer sullo stesso io_context, eseguiti qui sotto con run():
+            // con una read_until sincrona l'handler del timer non veniva mai eseguito e
+            // la lettura restava bloccata per sempre se il firmware smetteva di rispondere.
+            boost::asio::steady_timer timer(io_context_);
+            timer.expires_after(READ_TIMEOUT);
+            timer.async_wait([&](const boost::system::error_code &ec) {
+                if (!ec) {
+                    timedOut = true;
+                    boost::system::error_code ignored;
+                    serial_port_->cancel(ignored);
+                }
+            });
+
+            boost::asio::async_read_until(*serial_port_, boost::asio::dynamic_buffer(buffer_), '\n',
+                                          [&](const boost::system::error_code &ec, std::size_t) {
+                                              readError = ec;
+                                              timer.cancel();
+                                          });
+
+            io_context_.restart();
+            io_context_.run();
+
+            if (readError && readError != boost::asio::error::operation_aborted && !timedOut) {
+                Logger::logError("[SerialPort] Read error, closing port: " + readError.message());
+                boost::system::error_code ignored;
+                serial_port_->close(ignored);
+                return "";
+            }
+        } catch (const std::exception &e) {
+            Logger::logError("[SerialPort] Exception: " + std::string(e.what()));
+            return "";
+        }
+
+        return extractLine(line) ? line : "";
     }
 
     bool RealSerialPort::isOpen() const {

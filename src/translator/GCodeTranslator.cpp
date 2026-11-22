@@ -40,43 +40,46 @@ namespace translator::gcode {
     }
 
     void GCodeTranslator::parseLine(const std::string &line) {
-        Logger::logInfo("[GCodeTranslator] Parsing line: " + line);
-
         auto [command, params] = parseGCodeLine(line);
-
-        Logger::logInfo("[GCodeTranslator] Extracted command: " + command);
-        if (!params.empty()) {
-            std::stringstream paramStr;
-            for (const auto &[key, value]: params) {
-                paramStr << " " << key << "=" << value;
-            }
-            Logger::logInfo("[GCodeTranslator] Parameters:" + paramStr.str());
-        }
+        if (command.empty()) return; // riga di solo commento
 
         dispatchCommand(command, params);
     }
 
-    std::pair<std::string, std::map<std::string, double>> GCodeTranslator::parseGCodeLine(const std::string &line) {
+    std::pair<std::string, std::map<std::string, double>> GCodeTranslator::parseGCodeLine(const std::string &rawLine) {
+        // I commenti non sono parametri: "G1 X1 ; E3D nozzle" non deve estrudere 3 mm
+        std::string line = rawLine.substr(0, rawLine.find(';'));
+        for (size_t open = line.find('('); open != std::string::npos; open = line.find('(')) {
+            const size_t close = line.find(')', open);
+            line.erase(open, close == std::string::npos ? std::string::npos : close - open + 1);
+        }
+
         std::istringstream stream(line);
         std::string command;
         std::map<std::string, double> params;
 
         stream >> command;
 
-        // Convert command to uppercase for consistency
         for (char &c: command) {
-            c = std::toupper(c);
+            c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        }
+        // "G01" e "G1" sono lo stesso comando
+        while (command.size() > 2 && command[1] == '0' && std::isdigit(static_cast<unsigned char>(command[2]))) {
+            command.erase(1, 1);
         }
 
         std::string token;
         while (stream >> token) {
             if (token.length() < 2) continue;
 
-            char key = std::toupper(token[0]);
+            const char key = static_cast<char>(std::toupper(static_cast<unsigned char>(token[0])));
+            if (!std::isalpha(static_cast<unsigned char>(key))) continue;
             try {
-                double value = std::stod(token.substr(1));
+                size_t used = 0;
+                const double value = std::stod(token.substr(1), &used);
+                if (used != token.size() - 1) throw std::invalid_argument(token);
                 params[std::string(1, key)] = value;
-            } catch (const std::exception &e) {
+            } catch (const std::exception &) {
                 Logger::logWarning("[GCodeTranslator] Failed to parse parameter: " + token);
             }
         }
@@ -85,19 +88,12 @@ namespace translator::gcode {
     }
 
     void GCodeTranslator::dispatchCommand(const std::string &command, const std::map<std::string, double> &params) {
-        Logger::logInfo("[GCodeTranslator] Dispatching command: " + command +
-                        " to " + std::to_string(dispatchers_.size()) + " dispatchers");
-
         bool handled = false;
         for (auto &dispatcher: dispatchers_) {
             if (dispatcher->canHandle(command)) {
-                Logger::logInfo("[GCodeTranslator] Dispatcher found for command: " + command);
-
                 if (dispatcher->validate(command, params)) {
-                    Logger::logInfo("[GCodeTranslator] Command validated, handling: " + command);
                     dispatcher->handle(command, params);
                     handled = true;
-                    Logger::logInfo("[GCodeTranslator] Command handled successfully: " + command);
                 } else {
                     std::stringstream ss;
                     ss << "[GCodeTranslator] Command validation failed: " << command;

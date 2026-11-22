@@ -4,6 +4,8 @@
 
 #include "core/printer/impl/RealPrinter.hpp"
 #include "logger/Logger.hpp"
+#include <chrono>
+#include <stdexcept>
 
 namespace core {
     RealPrinter::RealPrinter(std::shared_ptr<SerialPort> serial)
@@ -17,7 +19,17 @@ namespace core {
             throw std::runtime_error("Serial port not open during printer initialization");
         }
 
+        // Il firmware ripete "Sistema pronto." ogni 5 s finche' non riceve un comando valido
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+
         while (true) {
+            if (std::chrono::steady_clock::now() > deadline) {
+                throw std::runtime_error("Firmware did not report ready within 60 s");
+            }
+            if (!serial_->isOpen()) {
+                throw std::runtime_error("Serial port closed during printer initialization");
+            }
+
             std::string line = serial_->receiveLine();
             if (line.empty()) continue;
 

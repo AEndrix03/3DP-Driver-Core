@@ -38,4 +38,20 @@ namespace core::command::system {
         return sendCommand('S', 10, {});
     }
 
+    types::Result SystemCommands::clearError() {
+        return sendCommand('S', 6, {});
+    }
+
+    types::Result SystemCommands::errorStatus() {
+        return sendCommand('S', 7, {});
+    }
+
+    types::Result SystemCommands::diagnostics() {
+        return sendCommand('S', 11, {});
+    }
+
+    types::Result SystemCommands::endPrint() {
+        return sendCommand('S', 12, {});
+    }
+
 } // namespace core::printer-command::system

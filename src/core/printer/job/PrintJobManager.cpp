@@ -9,6 +9,26 @@ namespace core::print {
     PrintJobManager::PrintJobManager(std::shared_ptr<DriverInterface> driver,
                                      std::shared_ptr<core::CommandExecutorQueue> commandQueue)
             : driver_(driver), commandQueue_(commandQueue), currentState_(JobState::CREATED) {
+        if (commandQueue_) {
+            // Guasto di comunicazione/macchina: la coda e' gia' stata svuotata, il job e' fallito
+            commandQueue_->setJobFaultCallback([this](const std::string &jobId, const std::string &reason) {
+                std::lock_guard<std::mutex> lock(stateMutex_);
+                if (jobId.empty() || jobId != currentJobId_) return;
+                Logger::logError("[PrintJobManager] Job " + jobId + " stopped: " + reason);
+                commandQueue_->setPaused(false);
+                updateState(JobState::FAILED);
+            });
+
+            // Ultimo comando eseguito: il firmware torna Idle, pronto per il job successivo
+            commandQueue_->setJobFinishedCallback([this](const std::string &jobId) {
+                std::lock_guard<std::mutex> lock(stateMutex_);
+                if (jobId.empty() || jobId != currentJobId_) return;
+                if (currentState_ != JobState::RUNNING) return;
+                driver_->system()->endPrint();
+                updateState(JobState::COMPLETED);
+                Logger::logInfo("[PrintJobManager] Job completed: " + jobId);
+            });
+        }
     }
 
     bool PrintJobManager::startPrintJob(const std::string &gcodePath, const std::string &jobId) {
@@ -29,11 +49,11 @@ namespace core::print {
             return false;
         }
 
-        // Send system start command
-        driver_->system()->startPrint();
-
-        // Update driver state
-        driver_->setState(PrintState::Printing);
+        // Lo stato Printing del firmware viene richiesto dal primo movimento: il G28
+        // iniziale del G-code deve trovare la macchina in Idle.
+        if (driver_->getState() == PrintState::Printing || driver_->getState() == PrintState::Paused) {
+            driver_->system()->endPrint();
+        }
 
         // Load file
         updateState(JobState::LOADING);
@@ -118,8 +138,12 @@ namespace core::print {
         }
 
         try {
-            driver_->system()->pause();
-            driver_->setState(PrintState::Paused);
+            // Prima si ferma la coda: i comandi restano in attesa invece di essere
+            // inviati (e rifiutati) a macchina in pausa.
+            commandQueue_->setPaused(true);
+            if (driver_->getState() == PrintState::Printing) {
+                driver_->system()->pause();
+            }
             updateState(JobState::PAUSED);
 
             // Update job tracker
@@ -142,8 +166,14 @@ namespace core::print {
         }
 
         try {
-            driver_->system()->resume();
-            driver_->setState(PrintState::Printing);
+            if (driver_->getState() == PrintState::Paused) {
+                const auto result = driver_->system()->resume();
+                if (!result.isSuccess()) {
+                    Logger::logError("[PrintJobManager] Resume rejected: " + result.message);
+                    return false;
+                }
+            }
+            commandQueue_->setPaused(false);
             updateState(JobState::RUNNING);
 
             // Update job tracker
@@ -175,7 +205,11 @@ namespace core::print {
         // Clear command queue
         if (commandQueue_) {
             commandQueue_->clearQueue();
+            commandQueue_->setPaused(false);
         }
+
+        // Ferma subito il movimento in corso, senza aspettare che finisca
+        driver_->abortMotion();
 
         // Update job tracker
         auto &jobTracker = jobs::JobTracker::getInstance();
@@ -184,7 +218,8 @@ namespace core::print {
         // Emergency stop
         try {
             driver_->motion()->emergencyStop();
-            driver_->setState(PrintState::Idle);
+            driver_->temperature()->setHotendTemperature(0);
+            driver_->system()->endPrint();
             updateState(JobState::CANCELLED);
 
             Logger::logInfo("[PrintJobManager] Job cancelled: " + currentJobId_);

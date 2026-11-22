@@ -1,170 +1,206 @@
 #include "core/CommandExecutor.hpp"
-#include "core/types/Error.hpp"
 #include "logger/Logger.hpp"
-#include <sstream>
 #include <chrono>
-#include <regex>
+#include <thread>
 
 namespace core {
 
+    namespace {
+        constexpr const char *BOOT_BANNER = "Avvio firmware 3DP";
+
+        bool startsWith(const std::string &text, const char *prefix) {
+            return text.rfind(prefix, 0) == 0;
+        }
+    }
+
     CommandExecutor::CommandExecutor(std::shared_ptr<SerialPort> serial, std::shared_ptr<CommandContext> context)
-            : serial_(std::move(serial)), context_(std::move(context)), firmwareSyncLost_(false) {
+            : serial_(std::move(serial)), context_(std::move(context)) {
         protocolHandler_ = std::make_shared<SerialProtocolHandler>(serial_);
     }
 
     types::Result CommandExecutor::sendCommandAndAwaitResponse(const std::string &command, uint32_t commandNumber) {
         std::lock_guard<std::mutex> lock(serialMutex_);
-        return sendCommandAndAwaitResponseLocked(command, commandNumber);
-    }
 
-    types::Result
-    CommandExecutor::sendCommandAndAwaitResponseLocked(const std::string &command, uint32_t commandNumber) {
-        context_->storeCommand(commandNumber, command);
-        lastSentCommand_ = command;
-        lastSentNumber_ = commandNumber;
+        types::Result result;
+        result.code = types::ResultCode::Error;
+        result.commandNumber = commandNumber;
 
-        protocolHandler_->sendCommand(command);
-        Logger::logInfo("[CommandExecutor] Sent N" + std::to_string(commandNumber) + ": " + command);
-
-        types::Result result = processResponse(commandNumber);
-
-        if (result.isDuplicate()) {
-            // Se è duplicato, si passa al comando successivo e si rimuove il duplicato dallo storico
-            context_->removeCommand(result.commandNumber.value());
-            return types::Result::duplicate(result.commandNumber.value());
-        } else if (result.isResend()) {
-            // Se è resend, recupera il comando dall'history e lo reinvia. Si rimuove l'attuale comando dallo storico: verrà inserito di nuovo successivamente
-            context_->removeCommand(commandNumber);
-
-            std::string resendCommand = context_->getCommandText(result.commandNumber.value());
-
-            if (resendCommand.empty()) {
-                Logger::logError("[CommandExecutor] RESEND FAILED - command N" +
-                                 std::to_string(result.commandNumber.value()) + " not found in history");
-                context_->setCommandNumber(result.commandNumber.value() - 1);
-                return types::Result::resendError(result.commandNumber.value());
+        for (int attempt = 1; attempt <= timing_.maxAttempts; ++attempt) {
+            if (!protocolHandler_->isOpen()) {
+                result.code = types::ResultCode::Error;
+                result.message = "Serial port not available";
+                return result;
             }
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            sendCommandAndAwaitResponseLocked(resendCommand, result.commandNumber.value());
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            return sendCommandAndAwaitResponseLocked(command,
-                                                     commandNumber); // Esegue nuovamente a prescindere dal result
-        } else if (result.isChecksumMismatch()) {
-            // Se il checksum non corrisponde, riesegue il comando: se era già stato eseguito arriverà DUPLICATE, se è stato saltato un comando arriverà RESEND, altrimenti OK
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            return sendCommandAndAwaitResponseLocked(command, commandNumber);
-        } else if (result.isSuccess() && result.commandNumber.has_value()) {
-            context_->removeCommand(commandNumber);
-            Logger::logInfo("[CommandExecutor] SET Command N" + std::to_string(result.commandNumber.value()) +
-                            " completed successfully");
-            context_->setCommandNumber(result.commandNumber.value() + 1);
-            return result;
-        }
+            protocolHandler_->sendCommand(command);
+            result = processResponse(commandNumber);
 
-        //TODO: Other recovery strategies can be implemented here
+            // Ritrasmettere lo stesso N e' sempre sicuro: se il firmware lo aveva
+            // gia' eseguito risponde E03 (duplicato), altrimenti lo esegue ora.
+            const bool retryable = result.isChecksumMismatch() || result.isTimeout();
+            if (!retryable) {
+                return result;
+            }
+
+            Logger::logWarning("[CommandExecutor] N" + std::to_string(commandNumber) + " attempt " +
+                               std::to_string(attempt) + "/" + std::to_string(timing_.maxAttempts) +
+                               " failed: " + result.message);
+
+            if (attempt < timing_.maxAttempts) {
+                std::this_thread::sleep_for(timing_.retryDelay);
+            }
+        }
 
         return result;
     }
 
     types::Result CommandExecutor::processResponse(uint32_t expectedNumber) {
-        const int maxRetries = 2;
-        const auto commandTimeout = std::chrono::milliseconds(300000);
-
-        int retries = 0;
         types::Result result;
-        result.code = types::ResultCode::Skip;
+        result.code = types::ResultCode::Timeout;
         result.commandNumber = expectedNumber;
 
-        auto commandStartTime = std::chrono::steady_clock::now();
+        const auto start = std::chrono::steady_clock::now();
+        auto lastActivity = start;
 
-        while (retries <= maxRetries) {
-            if (std::chrono::steady_clock::now() - commandStartTime > commandTimeout) {
-                Logger::logError("[CommandExecutor] Command timeout for N" + std::to_string(expectedNumber));
-                result.code = types::ResultCode::Success;
-                result.message = "Command timeout - continuing";
+        while (true) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now - lastActivity > timing_.inactivity) {
+                result.code = types::ResultCode::Timeout;
+                result.message = "No response from firmware";
+                return result;
+            }
+            if (now - start > timing_.absolute) {
+                result.code = types::ResultCode::Timeout;
+                result.message = "Command exceeded maximum duration";
                 return result;
             }
 
-            SerialMessage message = protocolHandler_->receiveMessage();
+            const SerialMessage message = protocolHandler_->receiveMessage();
 
-            if (message.rawMessage.empty()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            if (message.code == MessageCodeType::UNAVAIABLE_SERIAL_PORT ||
+                message.rawMessage == "CONN_LOST" || message.rawMessage == "SERIAL_ERROR") {
+                result.code = types::ResultCode::Error;
+                result.message = "Serial port not available";
+                return result;
+            }
+
+            if (message.type == MessageType::NONE) {
+                continue; // receiveLine ha gia' atteso il proprio timeout
+            }
+
+            lastActivity = std::chrono::steady_clock::now();
+
+            // Il firmware si e' riavviato mentre aspettavamo: tutto lo stato macchina e' perso
+            if (message.rawMessage.find(BOOT_BANNER) != std::string::npos ||
+                (SerialProtocolHandler::isValidMessage(message) && startsWith(message.payload, "BOOT "))) {
+                std::string cause = startsWith(message.payload, "BOOT ") ? message.payload.substr(5)
+                                                                           : readBootCause();
+                result.code = types::ResultCode::SyncLost;
+                result.message = "Firmware reboot detected (cause: " + cause + ")";
+                Logger::logError("[CommandExecutor] " + result.message);
+                return result;
+            }
+
+            if (startsWith(message.rawMessage, "BUSY")) {
                 continue;
             }
 
-            if (message.rawMessage.find("BUSY") == 0 || SerialProtocolHandler::isUnknown(message)) continue;
-
-            // Scarta messaggi non critici con checksum invalido
-            if (!SerialProtocolHandler::isValidMessage(message) && message.type != MessageType::CRITICAL) {
-                Logger::logWarning("[CommandExecutor] Invalid message discarded: " + message.rawMessage);
+            if (message.type == MessageType::INVALID) {
+                Logger::logWarning("[CommandExecutor] Discarded line without valid checksum: " + message.rawMessage);
                 continue;
             }
 
-            if (message.type == MessageType::INFORMATIONAL) {
+            if (message.type == MessageType::INFORMATIONAL || message.type == MessageType::CRITICAL) {
                 result.body.push_back(message.payload);
                 continue;
             }
 
-            if (message.type == MessageType::CRITICAL) {
-                Logger::logInfo("[CommandExecutor] Critical: " + message.payload);
-                result.body.push_back(message.payload);
+            // ---- risposta terminale ----
+            const auto number = SerialProtocolHandler::fetchMessageCommandNumber(message);
+
+            switch (message.code) {
+                case MessageCodeType::CHECKSUM_ERROR:
+                    // il firmware non sa a quale comando appartiene la riga corrotta
+                    result.code = types::ResultCode::ChecksumMismatch;
+                    result.message = "Firmware reported checksum error";
+                    return result;
+                case MessageCodeType::BUFFER_OVERFLOW_ERROR:
+                    result.code = types::ResultCode::BufferOverflow;
+                    result.message = "Command too long for firmware buffer";
+                    return result;
+                case MessageCodeType::RESEND_COMMAND_ERROR:
+                    result.code = types::ResultCode::Resend;
+                    result.commandNumber = number;
+                    result.message = "Firmware expects N" + (number ? std::to_string(*number) : std::string("?"));
+                    return result;
+                default:
+                    break;
+            }
+
+            if (!number || *number != expectedNumber) {
+                Logger::logWarning("[CommandExecutor] Stale response discarded (waiting N" +
+                                   std::to_string(expectedNumber) + "): " + message.payload);
                 continue;
             }
 
-            if (message.type == MessageType::STANDARD) {
-                if (SerialProtocolHandler::isOk(message)) {
+            switch (message.code) {
+                case MessageCodeType::OK:
                     result.code = types::ResultCode::Success;
                     result.message = "Command acknowledged";
-                } else {
-                    result.commandNumber = SerialProtocolHandler::fetchMessageCommandNumber(message);
-                    if (SerialProtocolHandler::isDuplicate(message)) {
-                        Logger::logInfo("[CommandExecutor] DUPLICATE response");
-                        result.code = types::ResultCode::Duplicate;
-                        result.message = "Command already processed";
-                    } else if (SerialProtocolHandler::isResend(message)) {
-                        Logger::logWarning("[CommandExecutor] RESEND request for N" +
-                                           std::to_string(result.commandNumber.value()));
-                        result.code = types::ResultCode::Resend;
-                        result.message = "Resend command";
-                    } else if (SerialProtocolHandler::isChecksumMismatch(message)) {
-                        Logger::logWarning("[CommandExecutor] Firmware checksum error");
-                        result.code = types::ResultCode::ChecksumMismatch;
-                        result.message = "Firmware reported checksum error";
-                    } else if (SerialProtocolHandler::isBufferOverflow(message)) {
-                        Logger::logError("[CommandExecutor] Firmware buffer overflow");
-                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-                    } else if (SerialProtocolHandler::isInvalidCategory(message)) {
-                        Logger::logError("[CommandExecutor] Invalid command category");
-                        result.code = types::ResultCode::Error;
-                        result.message = "Invalid command category";
-                    } else if (SerialProtocolHandler::isMotionBlocked(message)) {
-                        Logger::logWarning("[CommandExecutor] Motion blocked by firmware");
-                        result.code = types::ResultCode::Busy;
-                        result.message = "Motion blocked";
-                    } else if (SerialProtocolHandler::isTemperatureBlocked(message)) {
-                        Logger::logWarning("[CommandExecutor] Temperature operation blocked");
-                        result.code = types::ResultCode::Busy;
-                        result.message = "Temperature blocked";
-                    } else if (SerialProtocolHandler::isOperationCancelled(message)) {
-                        Logger::logInfo("[CommandExecutor] Operation cancelled by firmware");
-                        result.code = types::ResultCode::Skip;
-                        result.message = "Operation cancelled";
-                    } else if (SerialProtocolHandler::isNoError(message)) { // No error
-                        Logger::logInfo("[CommandExecutor] No error response");
-                        result.code = types::ResultCode::Success;
-                        result.message = "No error";
-                    } else {
-                        Logger::logWarning("[CommandExecutor] Unknown response");
-                        result.code = types::ResultCode::Error;
-                        result.message = "Unknown response - continuing";
+                    break;
+                case MessageCodeType::DUPLICATE_COMMAND_ERROR:
+                    // gia' eseguito: era andata persa solo la risposta
+                    result.code = types::ResultCode::Duplicate;
+                    result.message = "Command already executed (response was lost)";
+                    break;
+                case MessageCodeType::INVALID_CATEGORY_ERROR:
+                    result.code = types::ResultCode::Error;
+                    result.message = "Invalid command category";
+                    break;
+                case MessageCodeType::REJECTED_ERROR: {
+                    result.code = types::ResultCode::Rejected;
+                    result.message = "Rejected by firmware";
+                    for (const auto &line: result.body) {
+                        if (startsWith(line, "ERR ")) result.message = "Rejected by firmware: " + line.substr(4);
                     }
+                    break;
                 }
-                return result;
+                case MessageCodeType::BLOCKED_MOTION_ERROR:
+                case MessageCodeType::BLOCKED_TEMP_ERROR: {
+                    result.code = types::ResultCode::Busy;
+                    result.message = "Firmware is in error state";
+                    for (const auto &line: result.body) {
+                        if (startsWith(line, "ERR ")) result.message = "Firmware is in error state: " + line.substr(4);
+                    }
+                    break;
+                }
+                case MessageCodeType::CANCELLED_ERROR:
+                    result.code = types::ResultCode::Success;
+                    result.message = "Error cleared";
+                    break;
+                case MessageCodeType::NO_ERR:
+                    result.code = types::ResultCode::Success;
+                    result.message = "No error";
+                    break;
+                default:
+                    result.code = types::ResultCode::Error;
+                    result.message = "Unknown response: " + message.payload;
+                    break;
             }
+            return result;
         }
+    }
 
-        return result;
+    std::string CommandExecutor::readBootCause() {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+        while (std::chrono::steady_clock::now() < deadline) {
+            const SerialMessage message = protocolHandler_->receiveMessage();
+            if (SerialProtocolHandler::isValidMessage(message) && startsWith(message.payload, "BOOT ")) {
+                return message.payload.substr(5);
+            }
+            if (message.rawMessage.find("Sistema pronto") != std::string::npos) break;
+        }
+        return "UNKNOWN";
     }
 
 } // namespace core

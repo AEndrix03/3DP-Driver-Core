@@ -4,6 +4,7 @@
 #include <boost/asio.hpp>
 #include <string>
 #include <memory>
+#include <mutex>
 
 #ifdef _WIN32
 
@@ -35,6 +36,10 @@ namespace core {
         boost::asio::io_context io_context_;
         std::unique_ptr<boost::asio::serial_port> serial_port_;
         std::string buffer_;
+        std::mutex writeMutex_;
+
+        /// Estrae dal buffer la prima riga completa non vuota, se presente.
+        bool extractLine(std::string &line);
 
         void configurePort(uint32_t baudrate);
 

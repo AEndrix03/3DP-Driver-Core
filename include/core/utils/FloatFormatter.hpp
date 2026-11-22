@@ -13,29 +13,22 @@ namespace core::utils {
     constexpr int DEFAULT_PRECISION = 2;
 
     /**
-        * @brief Formatta un float rimuovendo zeri finali inutili, max default 2 decimali
-        */
-    inline std::string formatFloat(float value, int precision = DEFAULT_PRECISION) {
-        float factor = std::pow(10.0f, precision);
-        float rounded = std::round(value * factor) / factor;
-        if (rounded == std::floor(rounded)) {
-            return std::to_string(static_cast<int>(rounded));
-        }
+     * @brief Formatta un numero con al massimo `precision` decimali, senza zeri finali.
+     * Lavora in double: nessuna perdita di precisione sulle coordinate.
+     */
+    inline std::string formatFloat(double value, int precision = DEFAULT_PRECISION) {
+        if (!std::isfinite(value)) return "0";
 
         std::ostringstream oss;
-        oss << std::fixed << std::setprecision(precision) << rounded;
+        oss << std::fixed << std::setprecision(precision) << value;
         std::string result = oss.str();
 
-        // Rimuovi zeri finali
-        size_t end = result.find_last_not_of('0');
-        if (end != std::string::npos && result[end] == '.') end--;
-        return result.substr(0, end + 1);
-    }
-
-    /**
-     * @brief Overload per double
-     */
-    inline std::string formatFloat(double value) {
-        return formatFloat(static_cast<float>(value));
+        if (result.find('.') != std::string::npos) {
+            size_t end = result.find_last_not_of('0');
+            if (result[end] == '.') end--;
+            result.erase(end + 1);
+        }
+        if (result == "-0") result = "0";
+        return result;
     }
 } // namespace core::utils

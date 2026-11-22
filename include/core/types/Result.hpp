@@ -17,7 +17,9 @@ namespace core::types {
         BufferOverflow,
         Resend,
         ResendError,
-        Duplicate
+        Duplicate,
+        SyncLost,   // il firmware si e' riavviato o ha perso la sequenza: stato macchina non piu' attendibile
+        Rejected    // comando valido ma rifiutato dal firmware (E06): dettaglio in message
     };
 
     struct Result {
@@ -56,6 +58,18 @@ namespace core::types {
 
         inline bool isChecksumMismatch() const {
             return code == ResultCode::ChecksumMismatch;
+        }
+
+        inline bool isTimeout() const {
+            return code == ResultCode::Timeout;
+        }
+
+        inline bool isSyncLost() const {
+            return code == ResultCode::SyncLost;
+        }
+
+        inline bool isRejected() const {
+            return code == ResultCode::Rejected;
         }
 
         inline bool isBufferOverflow() const {

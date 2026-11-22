@@ -32,10 +32,14 @@ namespace core {
     }
 
     void CommandExecutorQueue::start() {
+        std::lock_guard<std::mutex> lifecycle(lifecycleMutex_);
         if (running_) {
-            Logger::logWarning("[CommandExecutorQueue] Already running");
             return;
         }
+
+        // Un thread terminato per eccezione resta joinable: riassegnarlo chiamerebbe std::terminate
+        if (processingThread_.joinable()) processingThread_.join();
+        if (healthThread_.joinable()) healthThread_.join();
 
         Logger::logInfo("[CommandExecutorQueue] Starting executor");
         running_ = true;
@@ -66,7 +70,8 @@ namespace core {
     }
 
     void CommandExecutorQueue::stop() {
-        if (!running_) return;
+        std::lock_guard<std::mutex> lifecycle(lifecycleMutex_);
+        if (!running_ && !processingThread_.joinable() && !healthThread_.joinable()) return;
 
         Logger::logInfo("[CommandExecutorQueue] Stopping...");
 
@@ -128,17 +133,13 @@ namespace core {
                         loadFromAllSourcesSafe();
                     }
 
-                    // Wait for commands if queue is empty
-                    if (commandQueue_.empty()) {
-                        // Use timeout to prevent infinite wait
-                        auto waitResult = queueCondition_.wait_for(lock, std::chrono::milliseconds(500));
-                        if (waitResult == std::cv_status::timeout) {
-                            // Periodic check - continue loop
-                            continue;
-                        }
+                    // In pausa passano solo i comandi urgenti (priorita' < 3)
+                    const bool nothingRunnable = commandQueue_.empty() ||
+                                                 (paused_ && commandQueue_.top().priority >= 3);
+                    if (nothingRunnable) {
+                        queueCondition_.wait_for(lock, std::chrono::milliseconds(500));
+                        continue;
                     }
-
-                    if (commandQueue_.empty()) continue;
 
                     // Get next command
                     command = commandQueue_.top();
@@ -148,30 +149,34 @@ namespace core {
                 }
 
                 if (hasCommand) {
-                    try {
-                        executeCommand(command);
-                        executedCount++;
+                    auto driver = translator_->getDriver();
+                    const uint64_t faultsBefore = driver ? driver->faultEpoch() : 0;
 
-                        // Update health tracking
-                        lastExecutionTime_ = std::chrono::steady_clock::now();
+                    executeCommand(command);
+                    executedCount++;
+                    lastExecutionTime_ = std::chrono::steady_clock::now();
 
-                        // Progress logging
-                        if (executedCount % 100 == 0) {
-                            auto now = std::chrono::steady_clock::now();
-                            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - lastLogTime).count();
-                            Logger::logInfo("[CommandExecutorQueue] Executed: " + std::to_string(executedCount) +
-                                            ", Rate: " + std::to_string(elapsed > 0 ? 100 / elapsed : 0) + " cmd/s");
-                            lastLogTime = now;
+                    if (driver && driver->faultEpoch() != faultsBefore) {
+                        // Timeout, desync, riavvio firmware, macchina in errore o comando
+                        // di job fallito: non si prosegue alla cieca.
+                        haltAfterFault(command.jobId, driver->lastFaultReason());
+                    } else if (markCommandDone(command.jobId)) {
+                        std::function<void(const std::string &)> callback;
+                        {
+                            std::lock_guard<std::mutex> cb(callbackMutex_);
+                            callback = jobFinishedCallback_;
                         }
+                        if (callback) callback(command.jobId);
+                    }
 
-                    } catch (const std::exception &e) {
-                        Logger::logError("[CommandExecutorQueue] Command execution failed: " + std::string(e.what()));
-                        // Continue processing other commands
+                    if (executedCount % 1000 == 0) {
+                        auto now = std::chrono::steady_clock::now();
+                        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - lastLogTime).count();
+                        Logger::logInfo("[CommandExecutorQueue] Executed: " + std::to_string(executedCount) +
+                                        ", Rate: " + std::to_string(elapsed > 0 ? 1000 / elapsed : 0) + " cmd/s");
+                        lastLogTime = now;
                     }
                 }
-
-                // Small delay to prevent busy waiting
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
         } catch (const std::exception &e) {
             Logger::logError("[CommandExecutorQueue] Processing loop crashed: " + std::string(e.what()));
@@ -206,26 +211,17 @@ namespace core {
             // Check if processing thread is alive
             bool threadAlive = processingThreadAlive_.load();
 
-            // Detect stall condition
-            bool isStalled = totalCommands > 0 && (timeSinceLastExecution > 15 || !threadAlive);
+            // Un comando lungo (homing, M109, Z lento) non e' uno stallo: il driver ha
+            // i propri timeout verso il firmware. Qui si segnala soltanto.
+            const bool isStalled = !paused_ && (timeSinceLastExecution > 120 || !threadAlive);
 
             if (isStalled && !executionStalled_) {
                 executionStalled_ = true;
-                Logger::logError("[CommandExecutorQueue] STALL DETECTED! " +
-                                 std::to_string(timeSinceLastExecution) + "s since last execution, " +
-                                 "thread alive: " + (threadAlive ? "true" : "false"));
-
-                // AGGRESSIVE RECOVERY STRATEGY
-                if (!threadAlive || timeSinceLastExecution > 60) {
-                    Logger::logError("[CommandExecutorQueue] CRITICAL: Processing thread dead or hung - RESTARTING");
-
-                    // Force restart processing thread
-                    restartProcessingThread();
-                } else {
-                    // Standard recovery
-                    recoverFromStall();
-                }
-
+                Logger::logWarning("[CommandExecutorQueue] No command completed for " +
+                                   std::to_string(timeSinceLastExecution) + "s, thread alive: " +
+                                   (threadAlive ? "true" : "false"));
+                queueCondition_.notify_all();
+            } else if (!isStalled) {
                 executionStalled_ = false;
             }
 
@@ -242,23 +238,13 @@ namespace core {
     }
 
     void CommandExecutorQueue::executeCommand(const PriorityCommand &cmd) {
-        auto &tracker = jobs::JobTracker::getInstance();
-        tracker.updateJobProgress(cmd.jobId, cmd.command);
-
         // Skip comments and empty lines
         if (cmd.command.empty() || cmd.command[0] == ';' || cmd.command[0] == '%') {
             updateStats(true, false);
             return;
         }
 
-        // Log critical commands
-        bool shouldLog = (cmd.priority <= 2) ||
-                         (cmd.command.find("M24") != std::string::npos) ||  // Start print
-                         (cmd.command.find("M25") != std::string::npos) ||  // Pause
-                         (cmd.command.find("M112") != std::string::npos) || // Emergency stop
-                         (cmd.command.find("G28") != std::string::npos);    // Homing
-
-        if (shouldLog) {
+        if (cmd.priority <= 2) {
             Logger::logInfo("[CommandExecutorQueue] EXECUTING: " + cmd.command +
                             " (priority=" + std::to_string(cmd.priority) + ", jobId=" + cmd.jobId + ")");
         }
@@ -266,24 +252,89 @@ namespace core {
         try {
             translator_->parseLine(cmd.command);
             updateStats(true, false);
-
-            if (shouldLog) {
-                Logger::logInfo("[CommandExecutorQueue] Command executed successfully");
-            }
-
         } catch (const GCodeTranslatorInvalidCommandException &e) {
             updateStats(false, true);
             Logger::logWarning("[CommandExecutorQueue] Invalid G-code: " + cmd.command + " - " + std::string(e.what()));
         } catch (const GCodeTranslatorUnknownCommandException &e) {
             updateStats(false, true);
             Logger::logWarning("[CommandExecutorQueue] Unknown G-code: " + cmd.command + " - " + std::string(e.what()));
+        } catch (const std::exception &e) {
+            // Il comando e' valido ma la macchina non l'ha eseguito (movimento rifiutato,
+            // riscaldamento fallito, ...): continuare produrrebbe una stampa sbagliata.
+            updateStats(false, true);
+            const std::string reason = "'" + cmd.command + "' failed: " + std::string(e.what());
+            Logger::logError("[CommandExecutorQueue] " + reason);
+            if (auto driver = translator_->getDriver()) {
+                driver->raiseFault(reason);
+            }
         }
 
-        catch (const std::exception &e) {
-            updateStats(false, true);
-            Logger::logError(
-                    "[CommandExecutorQueue] Execution error for '" + cmd.command + "': " + std::string(e.what()));
+        // Il progresso conta i comandi effettivamente elaborati
+        jobs::JobTracker::getInstance().updateJobProgress(cmd.jobId, cmd.command);
+    }
+
+    void CommandExecutorQueue::haltAfterFault(const std::string &jobId, const std::string &reason) {
+        size_t dropped = 0;
+        {
+            std::lock_guard<std::mutex> lock(queueMutex_);
+            std::lock_guard<std::mutex> diskLock(diskMutex_);
+            dropped = commandQueue_.size() + pagingBuffer_.size() + diskQueue_.size();
+            commandQueue_ = std::priority_queue<PriorityCommand>();
+            pagingBuffer_ = std::priority_queue<PriorityCommand>();
+            diskQueue_.clear();
+            pendingByJob_.clear();
         }
+
+        Logger::logError("[CommandExecutorQueue] HALTED after fault: " + reason + " - dropped " +
+                         std::to_string(dropped) + " pending commands");
+
+        if (!jobId.empty()) {
+            auto &tracker = jobs::JobTracker::getInstance();
+            const auto info = tracker.getJobInfo(jobId);
+            // Un job gia' annullato dall'utente resta "annullato"
+            if (info && (info->state == print::JobState::RUNNING || info->state == print::JobState::PAUSED)) {
+                tracker.failJob(jobId, reason);
+            }
+        }
+
+        std::function<void(const std::string &, const std::string &)> callback;
+        {
+            std::lock_guard<std::mutex> cb(callbackMutex_);
+            callback = jobFaultCallback_;
+        }
+        if (callback) callback(jobId, reason);
+    }
+
+    bool CommandExecutorQueue::markCommandDone(const std::string &jobId) {
+        if (jobId.empty()) return false;
+
+        std::lock_guard<std::mutex> lock(queueMutex_);
+        auto it = pendingByJob_.find(jobId);
+        if (it == pendingByJob_.end()) return false;
+
+        if (it->second > 1) {
+            it->second--;
+            return false;
+        }
+        pendingByJob_.erase(it);
+        return true;
+    }
+
+    void CommandExecutorQueue::setPaused(bool paused) {
+        paused_ = paused;
+        Logger::logInfo(std::string("[CommandExecutorQueue] ") + (paused ? "Paused" : "Resumed"));
+        queueCondition_.notify_all();
+    }
+
+    void CommandExecutorQueue::setJobFaultCallback(
+            std::function<void(const std::string &, const std::string &)> callback) {
+        std::lock_guard<std::mutex> lock(callbackMutex_);
+        jobFaultCallback_ = std::move(callback);
+    }
+
+    void CommandExecutorQueue::setJobFinishedCallback(std::function<void(const std::string &)> callback) {
+        std::lock_guard<std::mutex> lock(callbackMutex_);
+        jobFinishedCallback_ = std::move(callback);
     }
 
     // Rest of the methods remain the same but with FIXED locking order
@@ -380,6 +431,8 @@ namespace core {
                 return;
             }
 
+            if (!jobId.empty()) pendingByJob_[jobId]++;
+
             // High priority goes directly to RAM
             if (priority < 3) {
                 commandQueue_.push(cmd);
@@ -434,16 +487,13 @@ namespace core {
                     enqueuedCount++;
                 }
             }
+            if (!jobId.empty() && enqueuedCount > 0) pendingByJob_[jobId] += enqueuedCount;
             stats_.totalEnqueued += enqueuedCount;
         }
 
         Logger::logInfo("[CommandExecutorQueue] Successfully enqueued " + std::to_string(enqueuedCount) + " commands");
 
-        // Wake up processing thread
-        for (int i = 0; i < 5; ++i) {
-            queueCondition_.notify_all();
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
+        queueCondition_.notify_all();
     }
 
     void CommandExecutorQueue::enqueueFile(const std::string &filePath, int priority, const std::string &jobId) {
@@ -498,6 +548,7 @@ namespace core {
         std::priority_queue<PriorityCommand> emptyBuffer;
         pagingBuffer_.swap(emptyBuffer);
         diskQueue_.clear();
+        pendingByJob_.clear();
 
         if (clearedCount > 0) {
             Logger::logInfo("[CommandExecutorQueue] Cleared " + std::to_string(clearedCount) + " commands");
@@ -598,44 +649,6 @@ namespace core {
             diskFile_.close();
             std::filesystem::remove("temp/command_queue.dat");
         }
-    }
-
-    void CommandExecutorQueue::restartProcessingThread() {
-        Logger::logError("[CommandExecutorQueue] Forcing processing thread restart");
-
-        // Stop current thread if still joinable
-        running_ = false;
-        queueCondition_.notify_all();
-
-        if (processingThread_.joinable()) {
-            try {
-                processingThread_.join();
-                Logger::logInfo("[CommandExecutorQueue] Old processing thread joined");
-            } catch (const std::exception &e) {
-                Logger::logError("[CommandExecutorQueue] Error joining old thread: " + std::string(e.what()));
-            }
-        }
-
-        // Reset state
-        running_ = true;
-        stopping_ = false;
-        executionStalled_ = false;
-        processingThreadAlive_ = false;
-        lastExecutionTime_ = std::chrono::steady_clock::now();
-
-        // Start new processing thread
-        processingThread_ = std::thread([this]() {
-            try {
-                processingLoop();
-            } catch (const std::exception &e) {
-                Logger::logError(
-                        "[CommandExecutorQueue] Restarted processing thread crashed: " + std::string(e.what()));
-                processingThreadAlive_ = false;
-                running_ = false;
-            }
-        });
-
-        Logger::logInfo("[CommandExecutorQueue] Processing thread restarted successfully");
     }
 
     void CommandExecutorQueue::recoverFromStall() {

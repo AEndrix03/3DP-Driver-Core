@@ -12,7 +12,7 @@ namespace core {
  * @brief Costruisce una stringa comando completa da numero, categoria, codice e parametri.
  */
     std::string
-    CommandBuilder::buildCommand(uint16_t number, char category, int code, const std::vector<std::string> &params) {
+    CommandBuilder::buildCommand(uint32_t number, char category, int code, const std::vector<std::string> &params) {
         std::ostringstream oss;
 
         oss << "N" << number << " " << category << code;

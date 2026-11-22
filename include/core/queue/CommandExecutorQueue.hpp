@@ -14,6 +14,9 @@
 #include <string>
 #include <deque>
 #include <fstream>
+#include <functional>
+#include <unordered_map>
+#include <vector>
 
 namespace core {
 
@@ -55,6 +58,20 @@ namespace core {
 
         void clearQueue();
 
+        /**
+         * @brief Sospende/riprende l'esecuzione dei comandi di job (priorita' >= 3).
+         * I comandi urgenti (priorita' < 3) continuano a passare. Nessun comando viene perso.
+         */
+        void setPaused(bool paused);
+
+        bool isPaused() const { return paused_.load(); }
+
+        /// Chiamata (dal thread della coda) quando un job viene fermato per un guasto.
+        void setJobFaultCallback(std::function<void(const std::string &jobId, const std::string &reason)> callback);
+
+        /// Chiamata (dal thread della coda) quando l'ultimo comando di un job e' stato eseguito.
+        void setJobFinishedCallback(std::function<void(const std::string &jobId)> callback);
+
         struct Statistics {
             size_t totalEnqueued = 0;
             size_t totalExecuted = 0;
@@ -93,6 +110,15 @@ namespace core {
         std::thread healthThread_;                               // Health monitor thread
         std::atomic<bool> running_{false};
         std::atomic<bool> stopping_{false};
+        std::atomic<bool> paused_{false};
+        std::mutex lifecycleMutex_;
+
+        // Comandi ancora da eseguire per ciascun job (protetto da queueMutex_)
+        std::unordered_map<std::string, size_t> pendingByJob_;
+
+        std::mutex callbackMutex_;
+        std::function<void(const std::string &, const std::string &)> jobFaultCallback_;
+        std::function<void(const std::string &)> jobFinishedCallback_;
         std::atomic<uint64_t> nextSequenceId_{1};
 
         // Health monitoring
@@ -128,7 +154,11 @@ namespace core {
 
         void executeCommand(const PriorityCommand &cmd);
 
-        void restartProcessingThread();
+        /// Guasto durante un comando: svuota la coda e marca il job come fallito.
+        void haltAfterFault(const std::string &jobId, const std::string &reason);
+
+        /// Aggiorna il conteggio del job; ritorna true se era l'ultimo comando.
+        bool markCommandDone(const std::string &jobId);
 
         void recoverFromStall();
 

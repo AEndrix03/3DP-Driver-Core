@@ -17,7 +17,9 @@
 #include "core/command/temperature/TemperatureCommands.hpp"
 #include <memory>
 #include <vector>
-#include <mutex>  // ADDED
+#include <mutex>
+#include <atomic>
+#include <string>
 
 namespace core {
     /**
@@ -49,14 +51,46 @@ namespace core {
 
         types::Result sendCommandInternal(char category, int code, const std::vector<std::string> &params) const;
 
+        /**
+         * @brief Interrompe subito il movimento in corso sul firmware (carattere '!').
+         * Non passa dalla coda comandi: funziona anche mentre un comando sta eseguendo.
+         */
+        void abortMotion();
+
+        /**
+         * @brief Contatore dei guasti: aumenta a ogni timeout, perdita di sincronismo,
+         * riavvio del firmware o macchina in errore. Chi esegue un job lo confronta
+         * prima/dopo ogni comando per fermarsi invece di proseguire alla cieca.
+         */
+        uint64_t faultEpoch() const { return faultEpoch_.load(); }
+
+        std::string lastFaultReason() const;
+
+        /// Segnala un guasto rilevato a livello applicativo (es. riscaldamento fallito).
+        void raiseFault(const std::string &reason) const;
+
+        /// true finche' il collegamento col firmware non viene risincronizzato.
+        bool isLinkFaulted() const { return linkFault_.load(); }
+
+        std::shared_ptr<CommandExecutor> executor() const { return commandExecutor_; }
+
     private:
         std::shared_ptr<Printer> printer_;
         std::shared_ptr<SerialPort> serialPort_;
         std::shared_ptr<CommandContext> commandContext_;
         std::shared_ptr<CommandExecutor> commandExecutor_;
-        mutable PrintState currentState_;
+        mutable std::atomic<PrintState> currentState_;
 
         mutable std::mutex commandMutex_;
+        mutable std::mutex faultMutex_;
+        mutable std::atomic<uint64_t> faultEpoch_{0};
+        mutable std::atomic<bool> linkFault_{false};
+        mutable std::string lastFaultReason_;
+
+        /// Handshake "N0 S10": riallinea numerazione e stato. Richiede commandMutex_.
+        bool resyncLocked() const;
+
+        void applyStateAfterSuccess(char category, int code) const;
 
         std::shared_ptr<command::motion::MotionCommands> motion_;
         std::shared_ptr<command::endstop::EndstopCommands> endstop_;
