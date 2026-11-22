@@ -29,6 +29,9 @@ namespace core::print {
 
         bool cancelJob();
 
+        /// G-code da eseguire alla fine del prossimo job avviato (es. spegnimento heater, parcheggio).
+        void setEndGCode(const std::string &endGCode);
+
         /**
          * @brief Riprende un job interrotto (guasto, riavvio del firmware o del driver) dal suo
          * ultimo checkpoint: ripristina temperatura, ventola e modalita', torna al punto di
@@ -92,5 +95,6 @@ namespace core::print {
 
         bool parked_ = false;            // ugello sollevato e filamento ritratto durante la pausa
         std::string lastRecoveryError_;
+        std::string endGCode_;
     };
 } // namespace core::print

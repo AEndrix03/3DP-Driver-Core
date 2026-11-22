@@ -1101,6 +1101,50 @@ static void testRecoverAfterFirmwareReboot() {
               "e=" + std::to_string(extruded));
 }
 
+static void testEndGCodeAndCheckpointFile() {
+    prepareMachine();
+    const std::string path = writePrintFile();
+    JobRig rig;
+
+    // Il G-code di fine stampa del backend viene eseguito dopo l'ultima riga del file
+    rig.manager->setEndGCode(std::string("; fine stampa") + char(10) + "G1 X8 Y6 F6000" + char(10) + "M107");
+    CHECK(rig.manager->startPrintJob(path, "job-end"));
+    CHECK(rig.waitState(core::print::JobState::COMPLETED, 120s));
+    CHECK(idle());
+    CHECK_MSG(sim::steps().x == -800 + 640 && sim::steps().y == -800 + 480,
+              "x=" + std::to_string(sim::steps().x) + " y=" + std::to_string(sim::steps().y));
+
+    // Il checkpoint conserva tutto cio' che serve a riprendere, anche dopo un riavvio del driver
+    core::print::JobCheckpoint saved;
+    saved.jobId = "3f0c2a6e-roundtrip";
+    saved.gcodePath = path;
+    saved.nextLine = 42;
+    saved.positionKnown = true;
+    saved.x = 12.345;
+    saved.y = -6.5;
+    saved.z = 0.6;
+    saved.e = 123.4567;
+    saved.feedrate = 2400;
+    saved.absoluteE = false;
+    saved.hotendTarget = 205;
+    saved.fanSpeed = 128;
+    saved.endGCode = std::string("M104 S0") + char(10) + "G1 X0 Y200";
+    CHECK(saved.save());
+
+    const auto loaded = core::print::JobCheckpoint::load(saved.jobId);
+    CHECK(loaded.has_value());
+    if (loaded) {
+        CHECK(loaded->nextLine == 42 && loaded->positionKnown && !loaded->absoluteE && loaded->absoluteXYZ);
+        CHECK(std::fabs(loaded->x - 12.345) < 1e-9 && std::fabs(loaded->e - 123.4567) < 1e-9);
+        CHECK(loaded->hotendTarget == 205 && loaded->fanSpeed == 128);
+        CHECK(loaded->endGCode == saved.endGCode);
+    }
+    const auto latest = core::print::JobCheckpoint::latest();
+    CHECK(latest && latest->jobId == saved.jobId);
+    core::print::JobCheckpoint::remove(saved.jobId);
+    CHECK(!core::print::JobCheckpoint::load(saved.jobId).has_value());
+}
+
 static void testCancelJob() {
     prepareMachine();
     const std::string path = writePrintFile();
@@ -1165,6 +1209,7 @@ int main() {
             {"pause, park and resume",             testPauseAndResume},
             {"recover after link fault",           testRecoverAfterLinkFault},
             {"recover after firmware reboot",      testRecoverAfterFirmwareReboot},
+            {"end g-code and checkpoint file",     testEndGCodeAndCheckpointFile},
             {"cancel job",                         testCancelJob},
     };
 

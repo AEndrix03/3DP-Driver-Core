@@ -502,7 +502,8 @@ namespace core {
     }
 
     void CommandExecutorQueue::enqueueFile(const std::string &filePath, int priority, const std::string &jobId,
-                                           size_t startLine, const std::vector<std::string> &preamble) {
+                                           size_t startLine, const std::vector<std::string> &preamble,
+                                           const std::string &endGCode) {
         std::ifstream file(filePath);
         if (!file.is_open()) {
             Logger::logError("[CommandExecutorQueue] Cannot open file: " + filePath);
@@ -537,6 +538,18 @@ namespace core {
         }
         file.close();
 
+        // G-code di fine stampa: in coda al job, dopo l'ultima riga del file
+        std::istringstream endStream(endGCode);
+        while (std::getline(endStream, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty() || line.find_first_not_of(" \t") == std::string::npos || line[0] == ';') continue;
+            PriorityCommand cmd;
+            cmd.command = line;
+            cmd.priority = priority;
+            cmd.jobId = jobId;
+            commands.push_back(cmd);
+        }
+
         if (commands.empty()) {
             Logger::logWarning("[CommandExecutorQueue] No valid commands in file");
             return;
@@ -554,6 +567,7 @@ namespace core {
             std::lock_guard<std::mutex> lock(checkpointMutex_);
             trackedJobId_ = jobId;
             trackedPath_ = filePath;
+            trackedEndGCode_ = endGCode;
             inFlight_.clear();
             pendingCheckpoint_.reset();
         }
@@ -590,6 +604,7 @@ namespace core {
         print::JobCheckpoint c;
         c.jobId = trackedJobId_;
         c.gcodePath = trackedPath_;
+        c.endGCode = trackedEndGCode_;
         c.nextLine = static_cast<size_t>(fileLine);
         c.positionKnown = motion.positionKnown;
         c.x = motion.x;

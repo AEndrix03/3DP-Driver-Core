@@ -7,6 +7,7 @@
 #include "../events/printer-control/PrinterStartReceiver.hpp"
 #include "../events/printer-control/PrinterStopReceiver.hpp"
 #include "../events/printer-control/PrinterPauseReceiver.hpp"
+#include "../events/printer-control/PrinterResumeReceiver.hpp"
 #include "../processors/printer-control/PrinterControlProcessor.hpp"
 #include "../kafka/KafkaConfig.hpp"
 #include "core/DriverInterface.hpp"
@@ -34,6 +35,7 @@ namespace connector::controllers {
             size_t startRequests = 0;
             size_t stopRequests = 0;
             size_t pauseRequests = 0;
+            size_t resumeRequests = 0;
             size_t processingErrors = 0;
         };
 
@@ -48,6 +50,7 @@ namespace connector::controllers {
         std::shared_ptr<events::printer_control::PrinterStartReceiver> startReceiver_;
         std::shared_ptr<events::printer_control::PrinterStopReceiver> stopReceiver_;
         std::shared_ptr<events::printer_control::PrinterPauseReceiver> pauseReceiver_;
+        std::shared_ptr<events::printer_control::PrinterResumeReceiver> resumeReceiver_;
         std::shared_ptr<processors::printer_control::PrinterControlProcessor> processor_;
 
         mutable Statistics stats_;
@@ -58,5 +61,7 @@ namespace connector::controllers {
         void onStopMessageReceived(const std::string &message, const std::string &key);
 
         void onPauseMessageReceived(const std::string &message, const std::string &key);
+
+        void onResumeMessageReceived(const std::string &message, const std::string &key);
     };
 }

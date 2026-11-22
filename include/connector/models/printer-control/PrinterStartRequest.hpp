@@ -13,6 +13,7 @@ namespace connector::models::printer_control {
         std::string startGCode;
         std::string endGCode;
         std::string gcodeUrl;
+        std::string jobId; ///< id del job sul backend: e' quello usato poi per stato, pausa e ripresa
 
         PrinterStartRequest() = default;
 
@@ -29,7 +30,8 @@ namespace connector::models::printer_control {
                 {"driverId", driverId},
                 {"startGCode", startGCode},
                 {"endGCode", endGCode},
-                {"gcodeUrl", gcodeUrl}
+                {"gcodeUrl", gcodeUrl},
+                {"jobId", jobId}
             };
         }
 
@@ -45,6 +47,9 @@ namespace connector::models::printer_control {
             }
             if (json.contains("gcodeUrl") && !json["gcodeUrl"].is_null()) {
                 gcodeUrl = json["gcodeUrl"].get<std::string>();
+            }
+            if (json.contains("jobId") && !json["jobId"].is_null()) {
+                jobId = json["jobId"].get<std::string>();
             }
         }
 

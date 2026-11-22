@@ -34,6 +34,8 @@ namespace core::print {
         int fanSpeed = 0;
         int layer = 0;
 
+        std::string endGCode;      ///< G-code da eseguire a fine stampa (righe separate da '\n')
+
         /** Scrive il checkpoint in modo atomico (file temporaneo + rename). */
         bool save() const;
 

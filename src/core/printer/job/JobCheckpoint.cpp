@@ -19,6 +19,23 @@ namespace core::print {
             return fs::path(JobCheckpoint::directory()) / (safe + ".ckpt");
         }
 
+        // Il file e' a righe "chiave=valore": i ritorni a capo del G-code diventano '|'
+        // (carattere che nel G-code non compare).
+        std::string escape(std::string text) {
+            for (char &c: text) {
+                if (c == '\n') c = '|';
+                else if (c == '\r') c = ' ';
+            }
+            return text;
+        }
+
+        std::string unescape(std::string text) {
+            for (char &c: text) {
+                if (c == '|') c = '\n';
+            }
+            return text;
+        }
+
         std::optional<JobCheckpoint> read(const fs::path &file) {
             std::ifstream in(file);
             if (!in.is_open()) return std::nullopt;
@@ -49,6 +66,7 @@ namespace core::print {
                     else if (key == "hotendTarget") c.hotendTarget = std::stod(value);
                     else if (key == "fanSpeed") c.fanSpeed = std::stoi(value);
                     else if (key == "layer") c.layer = std::stoi(value);
+                    else if (key == "endGCode") c.endGCode = unescape(value);
                 } catch (const std::exception &) {
                     return std::nullopt;
                 }
@@ -84,6 +102,7 @@ namespace core::print {
                     << "hotendTarget=" << hotendTarget << "\n"
                     << "fanSpeed=" << fanSpeed << "\n"
                     << "layer=" << layer << "\n"
+                    << "endGCode=" << escape(endGCode) << "\n"
                     << "end\n";
                 if (!out.good()) return false;
             }

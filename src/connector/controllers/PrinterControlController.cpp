@@ -6,6 +6,7 @@
 #include "connector/models/printer-control/PrinterStartRequest.hpp"
 #include "connector/models/printer-control/PrinterStopRequest.hpp"
 #include "connector/models/printer-control/PrinterPauseRequest.hpp"
+#include "connector/models/printer-control/PrinterResumeRequest.hpp"
 #include "logger/Logger.hpp"
 #include <nlohmann/json.hpp>
 
@@ -23,6 +24,7 @@ namespace connector::controllers {
             startReceiver_ = std::make_shared<events::printer_control::PrinterStartReceiver>(config_);
             stopReceiver_ = std::make_shared<events::printer_control::PrinterStopReceiver>(config_);
             pauseReceiver_ = std::make_shared<events::printer_control::PrinterPauseReceiver>(config_);
+            resumeReceiver_ = std::make_shared<events::printer_control::PrinterResumeReceiver>(config_);
             // Create processor
             processor_ = std::make_shared<processors::printer_control::PrinterControlProcessor>(
                 driver_, commandQueue_, jobManager_);
@@ -36,6 +38,9 @@ namespace connector::controllers {
             });
             pauseReceiver_->setMessageCallback([this](const std::string &message, const std::string &key) {
                 onPauseMessageReceived(message, key);
+            });
+            resumeReceiver_->setMessageCallback([this](const std::string &message, const std::string &key) {
+                onResumeMessageReceived(message, key);
             });
 
             Logger::logInfo("[PrinterControlController] Created successfully");
@@ -54,7 +59,7 @@ namespace connector::controllers {
             return;
         }
 
-        if (!startReceiver_ || !stopReceiver_ || !pauseReceiver_ || !processor_) {
+        if (!startReceiver_ || !stopReceiver_ || !pauseReceiver_ || !resumeReceiver_ || !processor_) {
             Logger::logError("[PrinterControlController] Cannot start - components not initialized");
             return;
         }
@@ -64,6 +69,7 @@ namespace connector::controllers {
             startReceiver_->startReceiving();
             stopReceiver_->startReceiving();
             pauseReceiver_->startReceiving();
+            resumeReceiver_->startReceiving();
 
             running_ = true;
             Logger::logInfo("[PrinterControlController] Started successfully");
@@ -81,6 +87,7 @@ namespace connector::controllers {
             if (startReceiver_) startReceiver_->stopReceiving();
             if (stopReceiver_) stopReceiver_->stopReceiving();
             if (pauseReceiver_) pauseReceiver_->stopReceiving();
+            if (resumeReceiver_) resumeReceiver_->stopReceiving();
         } catch (const std::exception &e) {
             Logger::logError("[PrinterControlController] Error stopping: " + std::string(e.what()));
         }
@@ -92,7 +99,8 @@ namespace connector::controllers {
         return running_ &&
                startReceiver_ && startReceiver_->isReceiving() &&
                stopReceiver_ && stopReceiver_->isReceiving() &&
-               pauseReceiver_ && pauseReceiver_->isReceiving();
+               pauseReceiver_ && pauseReceiver_->isReceiving() &&
+               resumeReceiver_ && resumeReceiver_->isReceiving();
     }
 
     PrinterControlController::Statistics PrinterControlController::getStatistics() const {
@@ -162,6 +170,26 @@ namespace connector::controllers {
         } catch (const std::exception &e) {
             stats_.processingErrors++;
             Logger::logError("[PrinterControlController] Pause processing failed: " + std::string(e.what()));
+        }
+    }
+
+    void PrinterControlController::onResumeMessageReceived(const std::string &message, const std::string &key) {
+        stats_.resumeRequests++;
+        Logger::logInfo("[PrinterControlController] Resume message received, key: " + key);
+
+        try {
+            nlohmann::json json = nlohmann::json::parse(message);
+            models::printer_control::PrinterResumeRequest request(json);
+
+            if (!request.isValid() || request.driverId != config_.driverId) {
+                Logger::logInfo("[PrinterControlController] Resume request not for this driver");
+                return;
+            }
+
+            processor_->processPrinterResumeRequest(request);
+        } catch (const std::exception &e) {
+            stats_.processingErrors++;
+            Logger::logError("[PrinterControlController] Resume processing failed: " + std::string(e.what()));
         }
     }
 }

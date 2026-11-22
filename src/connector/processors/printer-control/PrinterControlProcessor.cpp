@@ -21,7 +21,10 @@ namespace connector::processors::printer_control {
         const models::printer_control::PrinterStartRequest &request) {
         Logger::logInfo("[PrinterControlProcessor] Processing start request for driver: " + request.driverId);
         try {
-            std::string jobId = generateJobId(request.driverId);
+            // L'id del backend, se presente: e' con quello che il backend chiede lo stato
+            // del job e ne comanda pausa, ripresa e annullamento.
+            std::string jobId = request.jobId.empty() ? generateJobId(request.driverId) : request.jobId;
+            jobManager_->setEndGCode(request.endGCode);
             // Execute pre-print G-code if provided
             if (!request.startGCode.empty()) {
                 Logger::logInfo("[PrinterControlProcessor] Executing start G-code");
@@ -80,6 +83,29 @@ namespace connector::processors::printer_control {
             }
         } catch (const std::exception &e) {
             Logger::logError("[PrinterControlProcessor] Pause request failed: " + std::string(e.what()));
+        }
+    }
+
+    void PrinterControlProcessor::processPrinterResumeRequest(
+        const models::printer_control::PrinterResumeRequest &request) const {
+        Logger::logInfo("[PrinterControlProcessor] Processing resume request for driver: " + request.driverId +
+                        (request.jobId.empty() ? "" : ", job: " + request.jobId));
+        try {
+            bool success;
+            if (jobManager_->getCurrentState() == core::print::JobState::PAUSED) {
+                success = jobManager_->resumeJob();
+            } else {
+                // Job interrotto (guasto, riavvio del firmware o del driver): riparte dal checkpoint
+                success = jobManager_->recoverJob(request.jobId);
+            }
+
+            if (success) {
+                Logger::logInfo("[PrinterControlProcessor] Job resumed successfully");
+            } else {
+                Logger::logError("[PrinterControlProcessor] Resume failed: " + jobManager_->lastRecoveryError());
+            }
+        } catch (const std::exception &e) {
+            Logger::logError("[PrinterControlProcessor] Resume request failed: " + std::string(e.what()));
         }
     }
 

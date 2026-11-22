@@ -4,6 +4,7 @@
 #include "../../models/printer-control/PrinterStartRequest.hpp"
 #include "../../models/printer-control/PrinterStopRequest.hpp"
 #include "../../models/printer-control/PrinterPauseRequest.hpp"
+#include "../../models/printer-control/PrinterResumeRequest.hpp"
 #include "core/DriverInterface.hpp"
 #include "core/queue/CommandExecutorQueue.hpp"
 #include "core/printer/job/PrintJobManager.hpp"
@@ -21,6 +22,8 @@ namespace connector::processors::printer_control {
         void processPrinterStopRequest(const models::printer_control::PrinterStopRequest &request) const;
 
         void processPrinterPauseRequest(const models::printer_control::PrinterPauseRequest &request) const;
+
+        void processPrinterResumeRequest(const models::printer_control::PrinterResumeRequest &request) const;
 
         std::string getProcessorName() const override {
             return "PrinterControlProcessor";

@@ -58,9 +58,11 @@ namespace core {
          * @brief Accoda un file G-code come job tracciato (con checkpoint per la ripresa).
          * @param startLine prima riga del file da eseguire (ripresa da checkpoint)
          * @param preamble comandi da eseguire prima del file (ripristino dello stato)
+         * @param endGCode G-code da eseguire dopo l'ultima riga del file
          */
         void enqueueFile(const std::string &filePath, int priority = 5, const std::string &jobId = "",
-                         size_t startLine = 0, const std::vector<std::string> &preamble = {});
+                         size_t startLine = 0, const std::vector<std::string> &preamble = {},
+                         const std::string &endGCode = "");
 
         /// Scrive subito su disco il checkpoint del job in corso (es. prima di una pausa).
         void saveCheckpointNow();
@@ -142,6 +144,7 @@ namespace core {
         std::mutex checkpointMutex_;
         std::string trackedJobId_;
         std::string trackedPath_;
+        std::string trackedEndGCode_;
         std::deque<LineRecord> inFlight_;
         std::optional<print::JobCheckpoint> pendingCheckpoint_;
         std::chrono::steady_clock::time_point lastCheckpointSave_{};

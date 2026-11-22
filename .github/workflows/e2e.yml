@@ -23,3 +23,21 @@ jobs:
           path: 3D-Printer-Firmware
       - name: Run end-to-end tests
         run: bash 3DP-Driver-Core/tests/integration/run.sh 3D-Printer-Firmware
+
+  driver-sources:
+    # Compila ogni sorgente del driver con le dipendenze vere (Boost.Asio, librdkafka,
+    # nlohmann-json, libcurl): copre porta seriale e connettori Kafka, che gli e2e non includono.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libboost-dev librdkafka-dev nlohmann-json3-dev libcurl4-openssl-dev zlib1g-dev
+      - name: Compile every source file
+        run: |
+          status=0
+          for f in $(git ls-files 'src/*.cpp'); do
+            g++ -std=c++17 -fsyntax-only -Iinclude "$f" || status=1
+          done
+          exit $status

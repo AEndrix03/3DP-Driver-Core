@@ -103,7 +103,7 @@ namespace core::print {
 
         // Queue the entire G-code file
         Logger::logInfo("[PrintJobManager] Enqueuing G-code file with " + std::to_string(lineCount) + " commands");
-        commandQueue_->enqueueFile(gcodePath, 3, jobId);
+        commandQueue_->enqueueFile(gcodePath, 3, jobId, 0, {}, endGCode_);
 
         // Update states
         updateState(JobState::RUNNING);
@@ -214,6 +214,11 @@ namespace core::print {
         }
     }
 
+    void PrintJobManager::setEndGCode(const std::string &endGCode) {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        endGCode_ = endGCode;
+    }
+
     bool PrintJobManager::recoverJob(const std::string &jobId) {
         std::lock_guard<std::mutex> lock(stateMutex_);
         return recoverLocked(jobId);
@@ -310,7 +315,8 @@ namespace core::print {
         parked_ = false;
 
         commandQueue_->setPaused(false);
-        commandQueue_->enqueueFile(checkpoint->gcodePath, 3, checkpoint->jobId, checkpoint->nextLine, preamble);
+        commandQueue_->enqueueFile(checkpoint->gcodePath, 3, checkpoint->jobId, checkpoint->nextLine, preamble,
+                                   checkpoint->endGCode);
         updateState(JobState::RUNNING);
 
         Logger::logInfo("[PrintJobManager] Recovering job " + checkpoint->jobId + " from line " +

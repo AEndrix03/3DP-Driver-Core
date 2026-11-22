@@ -66,4 +66,13 @@ della macchina all'inizio di quella riga: posizione, E, velocita', modalita', te
   rifiutata.
 - Viene ristampata al massimo la riga interrotta.
 
+### Comandi dal backend (Kafka)
+
+| Topic | Effetto |
+|-------|---------|
+| `printer-start-request` | avvia il job; `jobId` (id del job sul backend) diventa l'id del job anche sul driver, `endGCode` viene eseguito dopo l'ultima riga |
+| `printer-pause-request` | pausa con parcheggio |
+| `printer-resume-request` | riprende il job in pausa oppure, se interrotto, lo fa ripartire dal checkpoint di `jobId` |
+| `printer-stop-request` | annulla il job (arresto controllato, heater spento, checkpoint eliminato) |
+
 Il protocollo seriale e' documentato in `PROTOCOL.md` nel repo del firmware.
