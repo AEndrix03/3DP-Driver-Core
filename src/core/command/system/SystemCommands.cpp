@@ -38,6 +38,12 @@ namespace core::command::system {
         return sendCommand('S', 10, {});
     }
 
+    types::Result SystemCommands::homeAxes(const std::string &axes) {
+        std::vector<std::string> params;
+        for (char axis: axes) params.emplace_back(1, axis);
+        return sendCommand('S', 0, params);
+    }
+
     types::Result SystemCommands::clearError() {
         return sendCommand('S', 6, {});
     }

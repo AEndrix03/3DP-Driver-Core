@@ -42,7 +42,7 @@ compile() { # <src> <obj> <flags...>
 # -Dposition=fw_position: firmware e driver hanno entrambi position::Position
 while IFS= read -r src; do
     obj="$BUILD_DIR/fw/$(echo "${src#$FIRMWARE_DIR/}" | tr '/' '_').o"
-    compile "$src" "$obj" -DPLATFORM_NATIVE -Dposition=fw_position -I"$FIRMWARE_DIR/test/native"
+    compile "$src" "$obj" -DPLATFORM_NATIVE -DSIM_ENDSTOPS -Dposition=fw_position -I"$FIRMWARE_DIR/test/native"
 done < <(find "$FIRMWARE_DIR/src" "$FIRMWARE_DIR/test/native" -name '*.cpp' | sort)
 
 # ---- driver: solo il core (protocollo, comandi, traduttore, coda) -----------
@@ -61,9 +61,12 @@ driver_sources=(
     src/core/command/system/SystemCommands.cpp
     src/core/command/temperature/TemperatureCommands.cpp
     src/core/printer/job/tracking/JobTracker.cpp
+    src/core/printer/job/JobCheckpoint.cpp
+    src/core/printer/job/PrintJobManager.cpp
     src/core/printer/state/StateTracker.cpp
     src/core/queue/CommandExecutorQueue.cpp
     src/translator/GCodeTranslator.cpp
+    src/translator/dispatchers/fan/FanDispatcher.cpp
     src/translator/dispatchers/motion/MotionDispatcher.cpp
     src/translator/dispatchers/system/SystemDispatcher.cpp
     src/translator/dispatchers/temperature/TemperatureDispatcher.cpp

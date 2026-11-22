@@ -130,7 +130,6 @@ namespace core {
 
         switch (code) {
             case 0:  // homing completato
-            case 6:  // errore azzerato
             case 12: // fine stampa
                 self->setState(PrintState::Idle);
                 break;
@@ -204,6 +203,10 @@ namespace core {
             switch (result.code) {
                 case types::ResultCode::Success:
                     applyStateAfterSuccess(category, code);
+                    // S6 riporta in Idle solo se c'era davvero un errore da azzerare
+                    if (category == 'S' && code == 6 && result.message == "Error cleared") {
+                        const_cast<DriverInterface *>(this)->setState(PrintState::Idle);
+                    }
                     lastIssued_ = cmdNum;
                     if (result.completedNumber) lastCompleted_ = *result.completedNumber;
                     break;

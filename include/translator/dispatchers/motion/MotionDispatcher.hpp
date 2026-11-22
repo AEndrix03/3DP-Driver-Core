@@ -86,6 +86,16 @@ namespace translator::gcode {
                       std::optional<double> targetZ, std::optional<double> extrusion);
 
         void trackLayer(const std::map<std::string, double> &params);
+
+        /// Rende visibile lo stato corrente a chi salva i checkpoint.
+        void publishState() const;
+
+        /// F da inviare col prossimo movimento: solo se diverso dall'ultimo inviato
+        /// (nel firmware e' modale), per accorciare le righe sulla seriale.
+        std::optional<double> feedrateToSend();
+
+        double lastSentFeedrate_ = -1.0;
+        uint32_t feedrateSequenceEpoch_ = 0;
     };
 
 }

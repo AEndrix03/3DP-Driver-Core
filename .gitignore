@@ -9,3 +9,4 @@ vcpkg_installed/
 
 build-sim/
 temp/
+checkpoints/

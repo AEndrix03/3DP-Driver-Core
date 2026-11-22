@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <string>
+
 #include "core/command/CommandCategoryInterface.hpp"
 #include "./../../types/Result.hpp"
 
@@ -29,6 +31,9 @@ namespace core::command::system {
         types::Result brutalReset();
 
         types::Result printStatus();
+
+        /// S0 con assi: homing dei soli assi indicati (es. "XY")
+        types::Result homeAxes(const std::string &axes);
 
         /// S6: azzera lo stato di errore del firmware
         types::Result clearError();

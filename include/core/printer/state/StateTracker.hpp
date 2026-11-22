@@ -81,6 +81,24 @@ namespace core::state {
               }
 
               // Statistics
+              /// Stato del traduttore G-code che serve per riprendere una stampa
+              struct MotionSnapshot {
+                     bool positionKnown = false;
+                     double x = 0.0, y = 0.0, z = 0.0;
+                     bool absoluteXYZ = true;
+                     bool absoluteE = true;
+              };
+
+              void setMotionSnapshot(const MotionSnapshot &snapshot) {
+                     std::lock_guard<std::mutex> lock(cmdMutex_);
+                     motion_ = snapshot;
+              }
+
+              MotionSnapshot getMotionSnapshot() const {
+                     std::lock_guard<std::mutex> lock(cmdMutex_);
+                     return motion_;
+              }
+
               void incrementCommandCount() { commandCount_++; }
               size_t getCommandCount() const { return commandCount_; }
               // Reset for new job
@@ -121,5 +139,6 @@ namespace core::state {
               // Command tracking
               mutable std::mutex cmdMutex_;
               std::string lastCommand_;
+              MotionSnapshot motion_;
        };
 } // namespace core::state

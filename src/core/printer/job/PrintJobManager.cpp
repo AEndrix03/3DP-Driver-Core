@@ -4,8 +4,15 @@
 #include <cmath>
 #include <fstream>
 #include <filesystem>
+#include "core/printer/job/JobCheckpoint.hpp"
+#include "core/utils/FloatFormatter.hpp"
 
 namespace core::print {
+    namespace {
+        constexpr double PARK_LIFT_MM = 5.0;
+        constexpr float PARK_RETRACT_MM = 2.0f;
+    }
+
     PrintJobManager::PrintJobManager(std::shared_ptr<DriverInterface> driver,
                                      std::shared_ptr<core::CommandExecutorQueue> commandQueue)
             : driver_(driver), commandQueue_(commandQueue), currentState_(JobState::CREATED) {
@@ -24,7 +31,8 @@ namespace core::print {
                 std::lock_guard<std::mutex> lock(stateMutex_);
                 if (jobId.empty() || jobId != currentJobId_) return;
                 if (currentState_ != JobState::RUNNING) return;
-                driver_->system()->endPrint();
+                driver_->system()->endPrint(); // attende la fine dei movimenti in coda sul firmware
+                JobCheckpoint::remove(jobId);
                 updateState(JobState::COMPLETED);
                 Logger::logInfo("[PrintJobManager] Job completed: " + jobId);
             });
@@ -141,9 +149,20 @@ namespace core::print {
             // Prima si ferma la coda: i comandi restano in attesa invece di essere
             // inviati (e rifiutati) a macchina in pausa.
             commandQueue_->setPaused(true);
+            // Il firmware completa i pochi segmenti che ha gia' in coda e si ferma da solo
+            driver_->waitForIdle(std::chrono::seconds(60));
+
+            parked_ = false;
             if (driver_->getState() == PrintState::Printing) {
-                driver_->system()->pause();
+                // Parcheggio: ritrae il filamento e solleva l'ugello, cosi' non resta
+                // caldo e in pressione sul pezzo per tutta la pausa.
+                driver_->extruder()->retract(PARK_RETRACT_MM, 1800.0f);
+                const auto lift = driver_->motion()->moveRelative(
+                        {std::nullopt, std::nullopt, PARK_LIFT_MM, std::nullopt, 600.0});
+                parked_ = lift.isSuccess();
+                driver_->system()->pause(); // risponde quando la macchina e' ferma
             }
+            commandQueue_->saveCheckpointNow();
             updateState(JobState::PAUSED);
 
             // Update job tracker
@@ -161,8 +180,8 @@ namespace core::print {
     bool PrintJobManager::resumeJob() {
         std::lock_guard<std::mutex> lock(stateMutex_);
         if (currentState_ != JobState::PAUSED) {
-            Logger::logWarning("[PrintJobManager] Cannot resume - not paused");
-            return false;
+            // Non in pausa: se esiste un checkpoint e' una ripresa dopo un'interruzione
+            return recoverLocked(currentJobId_);
         }
 
         try {
@@ -172,6 +191,13 @@ namespace core::print {
                     Logger::logError("[PrintJobManager] Resume rejected: " + result.message);
                     return false;
                 }
+            }
+            if (parked_) {
+                // Ritorno esatto al punto di pausa: stessa quota, filamento di nuovo in pressione
+                driver_->motion()->moveRelative({std::nullopt, std::nullopt, -PARK_LIFT_MM, std::nullopt, 600.0});
+                driver_->extruder()->extrude(PARK_RETRACT_MM, 1800.0f);
+                driver_->waitForIdle(std::chrono::seconds(60));
+                parked_ = false;
             }
             commandQueue_->setPaused(false);
             updateState(JobState::RUNNING);
@@ -186,6 +212,110 @@ namespace core::print {
             Logger::logError("[PrintJobManager] Resume failed: " + std::string(e.what()));
             return false;
         }
+    }
+
+    bool PrintJobManager::recoverJob(const std::string &jobId) {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        return recoverLocked(jobId);
+    }
+
+    std::string PrintJobManager::lastRecoveryError() const {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        return lastRecoveryError_;
+    }
+
+    bool PrintJobManager::failRecovery(const std::string &reason) {
+        lastRecoveryError_ = reason;
+        Logger::logError("[PrintJobManager] Recovery failed: " + reason);
+        return false;
+    }
+
+    bool PrintJobManager::recoverLocked(const std::string &jobId) {
+        lastRecoveryError_.clear();
+
+        if (currentState_ == JobState::RUNNING || currentState_ == JobState::PAUSED ||
+            currentState_ == JobState::LOADING) {
+            return failRecovery("a job is already active");
+        }
+
+        const auto checkpoint = jobId.empty() ? JobCheckpoint::latest() : JobCheckpoint::load(jobId);
+        if (!checkpoint) {
+            return failRecovery("no checkpoint found");
+        }
+        if (!std::filesystem::exists(checkpoint->gcodePath)) {
+            return failRecovery("g-code file no longer available: " + checkpoint->gcodePath);
+        }
+
+        // --- collegamento e stato del firmware ---
+        driver_->system()->clearError(); // se serve risincronizza anche la numerazione
+        if (!driver_->waitForIdle(std::chrono::seconds(30))) {
+            return failRecovery("firmware not responding");
+        }
+        driver_->system()->endPrint(); // idempotente: porta il firmware in Idle da Printing/Paused
+        if (driver_->getState() != PrintState::Idle) {
+            return failRecovery("firmware not idle: " + DriverInterface::printStateToString(driver_->getState()));
+        }
+
+        bool referenced = false;
+        if (!driver_->motion()->getPosition(&referenced)) {
+            return failRecovery("cannot read machine position");
+        }
+
+        if (!referenced) {
+            // Il firmware si e' riavviato: ha perso la posizione
+            if (!checkpoint->positionKnown) {
+                return failRecovery("firmware restarted and the checkpoint has no position");
+            }
+            const auto homing = driver_->system()->homeAxes("XY");
+            bool xHomed = false, yHomed = false;
+            for (const auto &line: homing.body) {
+                if (line == "HOM X OK") xHomed = true;
+                if (line == "HOM Y OK") yHomed = true;
+            }
+            if (!homing.isSuccess() || !xHomed || !yHomed) {
+                return failRecovery("firmware restarted: X/Y endstops are required to find the position again");
+            }
+            // Z non si puo' azzerare col pezzo sul piano: si assume che non si sia mosso
+            const auto z = driver_->motion()->setPosition(
+                    {std::nullopt, std::nullopt, checkpoint->z, std::nullopt, std::nullopt});
+            if (!z.isSuccess()) {
+                return failRecovery("cannot restore Z position: " + z.message);
+            }
+        }
+
+        // --- ripristino dello stato, espresso in G-code cosi' che anche il traduttore si riallinei ---
+        using core::utils::formatFloat;
+        std::vector<std::string> preamble;
+        if (checkpoint->hotendTarget > 0.0) {
+            preamble.push_back("M109 S" + formatFloat(checkpoint->hotendTarget, 0));
+        }
+        preamble.push_back(checkpoint->fanSpeed > 0 ? "M106 S" + std::to_string(checkpoint->fanSpeed) : "M107");
+        preamble.push_back("G90");
+        preamble.push_back("M82");
+        preamble.push_back("G92 E" + formatFloat(checkpoint->e, 4));
+        if (checkpoint->positionKnown) {
+            // si arriva dall'alto, per non strisciare sul pezzo
+            preamble.push_back("G1 Z" + formatFloat(checkpoint->z + PARK_LIFT_MM, 3) + " F600");
+            preamble.push_back("G1 X" + formatFloat(checkpoint->x, 3) + " Y" + formatFloat(checkpoint->y, 3) +
+                               " F6000");
+            preamble.push_back("G1 Z" + formatFloat(checkpoint->z, 3) + " F600");
+        }
+        if (!checkpoint->absoluteXYZ) preamble.push_back("G91"); // imposta anche E relativo
+        preamble.push_back(checkpoint->absoluteE ? "M82" : "M83");
+        preamble.push_back("G1 F" + formatFloat(checkpoint->feedrate, 0));
+
+        currentJobId_ = checkpoint->jobId;
+        currentFilePath_ = checkpoint->gcodePath;
+        startTime_ = std::chrono::steady_clock::now();
+        parked_ = false;
+
+        commandQueue_->setPaused(false);
+        commandQueue_->enqueueFile(checkpoint->gcodePath, 3, checkpoint->jobId, checkpoint->nextLine, preamble);
+        updateState(JobState::RUNNING);
+
+        Logger::logInfo("[PrintJobManager] Recovering job " + checkpoint->jobId + " from line " +
+                        std::to_string(checkpoint->nextLine));
+        return true;
     }
 
     bool PrintJobManager::cancelJob() {
@@ -204,6 +334,7 @@ namespace core::print {
 
         // Clear command queue
         if (commandQueue_) {
+            commandQueue_->forgetJob(currentJobId_); // un job annullato non si riprende
             commandQueue_->clearQueue();
             commandQueue_->setPaused(false);
         }
@@ -214,6 +345,7 @@ namespace core::print {
         // Update job tracker
         auto &jobTracker = jobs::JobTracker::getInstance();
         jobTracker.cancelJob(currentJobId_);
+        JobCheckpoint::remove(currentJobId_);
 
         // Emergency stop
         try {

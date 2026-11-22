@@ -141,6 +141,11 @@ namespace translator::gcode {
 
     position::Position MotionDispatcher::currentPosition() {
         if (!position_) {
+            // M114 riporta la posizione istantanea: serve quella a movimenti conclusi,
+            // cioe' il punto da cui partira' il prossimo segmento.
+            if (!driver_->waitForIdle()) {
+                throw std::runtime_error("machine did not stop");
+            }
             position_ = driver_->motion()->getPosition();
             if (!position_) {
                 throw std::runtime_error("cannot read machine position");
@@ -196,18 +201,20 @@ namespace translator::gcode {
         target.y = param(params, "Y");
         target.z = param(params, "Z");
         target.e = extrusionDelta(params);
-        target.feedrate = feedrate_;
 
         if (!target.x && !target.y && !target.z && !target.e) {
             return; // solo F: gia' memorizzato
         }
 
         ensurePrinting();
+        target.feedrate = feedrateToSend();
 
         const auto result = absoluteXYZ_ ? driver_->motion()->moveAbsolute(target)
                                          : driver_->motion()->moveRelative(target);
         if (!result.isSuccess()) {
             position_.reset();
+            lastSentFeedrate_ = -1.0;
+            publishState();
             throw std::runtime_error("move failed: " + result.message);
         }
 
@@ -260,16 +267,43 @@ namespace translator::gcode {
                 target.e = upTo - extruded;
                 extruded = upTo;
             }
-            target.feedrate = feedrate_;
+            target.feedrate = feedrateToSend();
 
             const auto result = driver_->motion()->moveAbsolute(target);
             if (!result.isSuccess() || driver_->faultEpoch() != epoch) {
                 position_.reset();
+                lastSentFeedrate_ = -1.0;
+                publishState();
                 throw std::runtime_error("curve interrupted: " + result.message);
             }
 
             position_ = position::Position{p.x, p.y, target.z ? *target.z : start.z};
         }
+    }
+
+    std::optional<double> MotionDispatcher::feedrateToSend() {
+        // Dopo una risincronizzazione il firmware puo' essersi riavviato: F va rimandato
+        const uint32_t epoch = driver_->sequenceEpoch();
+        if (epoch != feedrateSequenceEpoch_) {
+            feedrateSequenceEpoch_ = epoch;
+            lastSentFeedrate_ = -1.0;
+        }
+        if (std::fabs(feedrate_ - lastSentFeedrate_) < 0.5) return std::nullopt;
+        lastSentFeedrate_ = feedrate_;
+        return feedrate_;
+    }
+
+    void MotionDispatcher::publishState() const {
+        core::state::StateTracker::MotionSnapshot snapshot;
+        snapshot.positionKnown = position_.has_value();
+        if (position_) {
+            snapshot.x = position_->x;
+            snapshot.y = position_->y;
+            snapshot.z = position_->z;
+        }
+        snapshot.absoluteXYZ = absoluteXYZ_;
+        snapshot.absoluteE = absoluteE_;
+        core::state::StateTracker::getInstance().setMotionSnapshot(snapshot);
     }
 
     void MotionDispatcher::home() {
@@ -287,9 +321,11 @@ namespace translator::gcode {
 
         const auto result = driver_->system()->homing();
         if (!result.isSuccess()) {
+            publishState();
             throw std::runtime_error("homing failed: " + result.message);
         }
         lastLayerZ_ = 0.0;
+        position_ = driver_->motion()->getPosition();
     }
 
     void MotionDispatcher::setPosition(const std::map<std::string, double> &params) {
@@ -307,9 +343,16 @@ namespace translator::gcode {
         if (!position.x && !position.y && !position.z) return; // solo E: e' una grandezza del driver
 
         const auto result = driver_->motion()->setPosition(position);
-        position_.reset();
         if (!result.isSuccess()) {
+            position_.reset();
             throw std::runtime_error("set position failed: " + result.message);
+        }
+        if (position_) {
+            if (position.x) position_->x = *position.x;
+            if (position.y) position_->y = *position.y;
+            if (position.z) position_->z = *position.z;
+        } else if (position.x && position.y && position.z) {
+            position_ = position::Position{*position.x, *position.y, *position.z};
         }
     }
 
@@ -409,5 +452,6 @@ namespace translator::gcode {
         if (!isSpline) {
             lastSplineControl_.reset();
         }
+        publishState();
     }
 } // namespace translator::gcode

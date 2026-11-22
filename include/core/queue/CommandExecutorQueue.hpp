@@ -14,6 +14,9 @@
 #include <string>
 #include <deque>
 #include <fstream>
+#include <chrono>
+#include <optional>
+#include "core/printer/job/JobCheckpoint.hpp"
 #include <functional>
 #include <unordered_map>
 #include <vector>
@@ -25,6 +28,7 @@ namespace core {
         int priority;
         std::string jobId;
         uint64_t sequenceId;
+        int64_t fileLine = -1; ///< indice della riga nel file G-code del job (-1 = non appartiene a un file)
 
         bool operator<(const PriorityCommand &other) const {
             if (priority != other.priority) {
@@ -50,7 +54,19 @@ namespace core {
 
         void enqueue(const std::string &command, int priority = 5, const std::string &jobId = "");
 
-        void enqueueFile(const std::string &filePath, int priority = 5, const std::string &jobId = "");
+        /**
+         * @brief Accoda un file G-code come job tracciato (con checkpoint per la ripresa).
+         * @param startLine prima riga del file da eseguire (ripresa da checkpoint)
+         * @param preamble comandi da eseguire prima del file (ripristino dello stato)
+         */
+        void enqueueFile(const std::string &filePath, int priority = 5, const std::string &jobId = "",
+                         size_t startLine = 0, const std::vector<std::string> &preamble = {});
+
+        /// Scrive subito su disco il checkpoint del job in corso (es. prima di una pausa).
+        void saveCheckpointNow();
+
+        /// Smette di tracciare il job ed elimina il suo checkpoint (job annullato).
+        void forgetJob(const std::string &jobId);
 
         void enqueueCommands(const std::vector<std::string> &commands, int priority = 5, const std::string &jobId = "");
 
@@ -115,6 +131,28 @@ namespace core {
 
         // Comandi ancora da eseguire per ciascun job (protetto da queueMutex_)
         std::unordered_map<std::string, size_t> pendingByJob_;
+
+        // --- checkpoint del job in corso (usati solo dal thread della coda, tranne dove indicato) ---
+        struct LineRecord {
+            print::JobCheckpoint start;  // stato all'inizio della riga
+            uint32_t lastCommand;        // ultimo comando firmware generato dalla riga
+            uint32_t sequenceEpoch;
+            bool issued;                 // false finche' la riga non e' stata inviata per intero
+        };
+        std::mutex checkpointMutex_;
+        std::string trackedJobId_;
+        std::string trackedPath_;
+        std::deque<LineRecord> inFlight_;
+        std::optional<print::JobCheckpoint> pendingCheckpoint_;
+        std::chrono::steady_clock::time_point lastCheckpointSave_{};
+
+        print::JobCheckpoint captureState(int64_t fileLine) const;
+
+        void beginLine(const PriorityCommand &cmd);
+
+        void endLine(const PriorityCommand &cmd, bool faulted);
+
+        void persistCheckpoint(bool force);
 
         std::mutex callbackMutex_;
         std::function<void(const std::string &, const std::string &)> jobFaultCallback_;

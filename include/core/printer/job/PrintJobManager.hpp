@@ -29,6 +29,21 @@ namespace core::print {
 
         bool cancelJob();
 
+        /**
+         * @brief Riprende un job interrotto (guasto, riavvio del firmware o del driver) dal suo
+         * ultimo checkpoint: ripristina temperatura, ventola e modalita', torna al punto di
+         * interruzione e prosegue dalla prima riga non completata.
+         *
+         * Se il firmware si e' riavviato la posizione va ritrovata: X e Y vengono riazzerati
+         * sui finecorsa (che devono essere abilitati), Z viene assunto fermo dove era.
+         *
+         * @param jobId job da riprendere; vuoto = il checkpoint piu' recente
+         */
+        bool recoverJob(const std::string &jobId = "");
+
+        /// Motivo dell'ultimo recoverJob() fallito.
+        std::string lastRecoveryError() const;
+
         // Status
         JobState getCurrentState() const;
 
@@ -70,5 +85,12 @@ namespace core::print {
         void updateState(JobState newState);
 
         void resetJob();
+
+        bool recoverLocked(const std::string &jobId);
+
+        bool failRecovery(const std::string &reason);
+
+        bool parked_ = false;            // ugello sollevato e filamento ritratto durante la pausa
+        std::string lastRecoveryError_;
     };
 } // namespace core::print

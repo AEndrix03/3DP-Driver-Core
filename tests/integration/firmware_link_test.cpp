@@ -14,6 +14,10 @@
 #include "core/utils/FloatFormatter.hpp"
 #include "logger/Logger.hpp"
 #include "translator/GCodeTranslator.hpp"
+#include "core/printer/job/JobCheckpoint.hpp"
+#include "core/printer/job/PrintJobManager.hpp"
+#include "core/printer/state/StateTracker.hpp"
+#include "translator/dispatchers/fan/FanDispatcher.hpp"
 #include "translator/dispatchers/motion/MotionDispatcher.hpp"
 #include "translator/dispatchers/system/SystemDispatcher.hpp"
 #include "translator/dispatchers/temperature/TemperatureDispatcher.hpp"
@@ -25,6 +29,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <mutex>
@@ -51,6 +57,20 @@ void Logger::logInfo(const std::string &) {}
 void Logger::logWarning(const std::string &message) { keep("[W] ", message); }
 
 void Logger::logError(const std::string &message) { keep("[E] ", message); }
+
+// ---------------------------------------------------------------------------
+// Il download del G-code via HTTP (libcurl) non fa parte di questi test
+// ---------------------------------------------------------------------------
+namespace core::print {
+    GCodeDownloader::GCodeDownloader() = default;
+
+    GCodeDownloader::~GCodeDownloader() = default;
+
+    void GCodeDownloader::downloadAsync(const std::string &, const std::string &, ProgressCallback,
+                                        CompletionCallback) {}
+
+    void GCodeDownloader::cancelDownload() {}
+}
 
 // ---------------------------------------------------------------------------
 // Mini framework
@@ -188,6 +208,7 @@ static void fastTiming() {
 /// Riporta firmware e driver in uno stato noto: Idle, nessun errore, posizione zero.
 static void normalize() {
     sim::setTimeScale(1.0);
+    sim::clearEndstops();
     driver->system()->clearError();
     driver->waitForIdle(60s);
     driver->system()->endPrint();
@@ -718,8 +739,15 @@ static void testGCodeTranslation() {
         }
     };
 
-    CHECK(run("G28")); // nessun finecorsa abilitato: azzera sul posto
+    // Finecorsa a 5 mm (X, Y) e 1 mm (Z) dalla posizione attuale
+    sim::setEndstop(0, -400);
+    sim::setEndstop(1, -400);
+    sim::setEndstop(2, -400);
+    CHECK(run("G28"));
     CHECK(driver->getState() == core::PrintState::Idle);
+    CHECK(sim::steps().x == -300 && sim::steps().y == -300 && sim::steps().z == -350); // contatto + rimbalzo
+    sim::clearEndstops();
+    CHECK(run("G92 X0 Y0 Z0"));
     sim::resetSteps();
 
     CHECK(run("G90"));
@@ -770,6 +798,9 @@ static void testGCodeTranslation() {
     CHECK(sim::steps().x == 2080);
 
     // Nuovo homing a stampa in corso: il driver esce da Printing prima di S0
+    sim::setEndstop(0, sim::steps().x - 80);
+    sim::setEndstop(1, sim::steps().y - 80);
+    sim::setEndstop(2, sim::steps().z - 80);
     CHECK(run("G28"));
     CHECK(driver->getState() == core::PrintState::Idle);
 }
@@ -825,6 +856,274 @@ static void testQueueStopsOnFault() {
     queue.stop();
 }
 
+
+static void testHomingAndEndstops() {
+    normalize();
+
+    // --- homing riuscito: zero sul finecorsa, poi rimbalzo ---
+    sim::setEndstop(0, -800);
+    sim::setEndstop(1, -800);
+    sim::setEndstop(2, -400);
+    auto result = driver->system()->homing();
+    CHECK_MSG(result.isSuccess(), result.message);
+    CHECK(contains(result, "HOM X OK") && contains(result, "HOM Y OK") && contains(result, "HOM Z OK"));
+    CHECK(sim::steps().x == -700 && sim::steps().y == -700 && sim::steps().z == -350);
+
+    bool referenced = false;
+    auto position = driver->motion()->getPosition(&referenced);
+    CHECK(referenced);
+    CHECK(position && std::fabs(position->x - 1.25) < 0.001 && std::fabs(position->z - 0.125) < 0.001);
+
+    // --- solo X: gli altri assi non si muovono ---
+    CHECK(driver->system()->startPrint().isSuccess());
+    CHECK(driver->motion()->moveAbsolute({20.0, 20.0, std::nullopt, std::nullopt, 6000.0}).isSuccess());
+    CHECK(idle());
+    CHECK(driver->system()->endPrint().isSuccess());
+    const long yBefore = sim::steps().y;
+    result = driver->system()->homeAxes("X");
+    CHECK_MSG(result.isSuccess(), result.message);
+    CHECK(sim::steps().x == -700 && sim::steps().y == yBefore);
+
+    // --- finecorsa urtato durante la stampa: arresto e stato di errore ---
+    CHECK(driver->system()->startPrint().isSuccess());
+    CHECK(driver->motion()->moveAbsolute({-5.0, std::nullopt, std::nullopt, std::nullopt, 3000.0}).isSuccess());
+    CHECK(waitFor([&] {
+        return contains(driver->system()->errorStatus(), "ENDSTOP");
+    }, 3s));
+    CHECK(sim::steps().x > -1300); // fermato sul finecorsa, non a destinazione (-1200 - ...)
+    result = driver->motion()->moveRelative({1.0, std::nullopt, std::nullopt, std::nullopt, 1000.0});
+    CHECK(result.isBusy());
+    CHECK(driver->system()->clearError().isSuccess());
+
+    // --- finecorsa che non scatta mai: l'homing fallisce invece di girare all'infinito ---
+    sim::clearEndstops();
+    sim::setTimeScale(20.0);
+    result = driver->system()->homeAxes("X");
+    sim::setTimeScale(1.0);
+    CHECK(result.isRejected());
+    CHECK(contains(result, "HOM X FAIL"));
+    CHECK(contains(driver->system()->printStatus(), "STA Idle"));
+}
+
+// ---------------------------------------------------------------------------
+// Job di stampa completi, attraverso PrintJobManager
+// ---------------------------------------------------------------------------
+namespace {
+    constexpr int LAYERS = 3;
+    constexpr double E_PER_MOVE = 0.5;
+
+    /// Piccola stampa: per ogni layer due rette, un arco e una spline, tutti con estrusione.
+    std::string writePrintFile() {
+        std::filesystem::create_directories("gcode");
+        const std::string path = "gcode/test_print.gcode";
+        std::ofstream out(path);
+        out << "; stampa di prova\nG28\nG90\nM82\nG92 E0\nM106 S200\nG1 X10 Y10 F6000 ; avvicinamento\n";
+        double e = 0.0;
+        for (int layer = 0; layer < LAYERS; ++layer) {
+            out << ";LAYER:" << layer << "\n";
+            out << "G1 Z" << 0.2 * (layer + 1) << " F600\n";
+            out << "G1 X30 Y10 E" << (e += E_PER_MOVE) << " F2400\n";
+            out << "G1 X30 Y30 E" << (e += E_PER_MOVE) << "\n";
+            out << "G2 X10 Y30 I-10 J0 E" << (e += E_PER_MOVE) << " ; arco\n";
+            out << "G5 X10 Y10 I-5 J-5 P-5 Q5 E" << (e += E_PER_MOVE) << " ; spline\n";
+        }
+        out << "G1 E" << (e - 1.0) << " F1800 ; ritrazione finale\nM107\nG1 X5 Y5 F6000\n";
+        return path;
+    }
+
+    struct JobRig {
+        std::shared_ptr<translator::gcode::GCodeTranslator> translator;
+        std::shared_ptr<core::CommandExecutorQueue> queue;
+        std::shared_ptr<core::print::PrintJobManager> manager;
+
+        JobRig() {
+            translator = std::make_shared<translator::gcode::GCodeTranslator>(driver);
+            translator->registerDispatcher(std::make_unique<MotionDispatcher>(driver));
+            translator->registerDispatcher(std::make_unique<translator::gcode::SystemDispatcher>(driver));
+            translator->registerDispatcher(std::make_unique<translator::gcode::TemperatureDispatcher>(driver));
+            translator->registerDispatcher(std::make_unique<translator::gcode::FanDispatcher>(driver));
+            queue = std::make_shared<core::CommandExecutorQueue>(translator);
+            manager = std::make_shared<core::print::PrintJobManager>(driver, queue);
+        }
+
+        ~JobRig() { queue->stop(); }
+
+        bool waitState(core::print::JobState state, std::chrono::milliseconds timeout) {
+            return waitFor([&] { return manager->getCurrentState() == state; }, timeout);
+        }
+    };
+
+    // La macchina simulata ha i finecorsa in un punto fisso: ogni job si azzera li',
+    // quindi le posizioni finali dei diversi job sono confrontabili passo per passo.
+    void prepareMachine() {
+        static bool endstopsPlaced = false;
+        sim::setTimeScale(1.0);
+        driver->system()->clearError();
+        driver->waitForIdle(60s);
+        driver->system()->endPrint();
+        if (!endstopsPlaced) {
+            sim::resetSteps();
+            endstopsPlaced = true;
+        }
+        sim::setEndstop(0, -800);
+        sim::setEndstop(1, -800);
+        sim::setEndstop(2, -400);
+        // stato lasciato dai test precedenti: nessuna temperatura da ripristinare
+        core::state::StateTracker::getInstance().setHotendTargetTemp(0.0);
+        std::error_code ec;
+        std::filesystem::remove_all(core::print::JobCheckpoint::directory(), ec);
+        sim::setTimeScale(4.0);
+    }
+
+    sim::Steps referenceSteps; // posizione finale di una stampa senza interruzioni
+    const long E_PER_LINE = static_cast<long>(E_PER_MOVE * 80);
+}
+
+static void testFullPrintJob() {
+    prepareMachine();
+    const std::string path = writePrintFile();
+    JobRig rig;
+
+    CHECK(rig.manager->startPrintJob(path, "job-full"));
+    CHECK(rig.waitState(core::print::JobState::COMPLETED, 120s));
+    CHECK(idle());
+
+    referenceSteps = sim::steps();
+    // X5 Y5 e Z 0.6 rispetto allo zero dei finecorsa (-800, -800, -400)
+    CHECK_MSG(referenceSteps.x == -800 + 400 && referenceSteps.y == -800 + 400,
+              "x=" + std::to_string(referenceSteps.x) + " y=" + std::to_string(referenceSteps.y));
+    CHECK_MSG(referenceSteps.z == -400 + 240, "z=" + std::to_string(referenceSteps.z));
+    // 12 movimenti da 0.5 mm, meno 1 mm di ritrazione finale = 5 mm = 400 step
+    CHECK_MSG(referenceSteps.e == 400, "e=" + std::to_string(referenceSteps.e));
+
+    CHECK(driver->getState() == core::PrintState::Idle);                 // il firmware e' tornato Idle
+    CHECK(!core::print::JobCheckpoint::load("job-full").has_value());    // niente da riprendere
+    CHECK(!driver->isLinkFaulted());
+
+    // Un secondo job parte senza interventi manuali
+    CHECK(rig.manager->startPrintJob(path, "job-second"));
+    CHECK(rig.waitState(core::print::JobState::COMPLETED, 120s));
+    CHECK(idle());
+    CHECK(sim::steps().x == referenceSteps.x && sim::steps().e == 2 * referenceSteps.e);
+}
+
+static void testPauseAndResume() {
+    prepareMachine();
+    const std::string path = writePrintFile();
+    JobRig rig;
+    const long eStart = sim::steps().e;
+
+    CHECK(rig.manager->startPrintJob(path, "job-pause"));
+    CHECK(waitFor([&] { return sim::steps().e - eStart > 3 * E_PER_LINE; }, 60s)); // a stampa avviata
+
+    CHECK(rig.manager->pauseJob());
+    CHECK(rig.manager->getCurrentState() == core::print::JobState::PAUSED);
+    CHECK(driver->getState() == core::PrintState::Paused);
+
+    // In pausa: macchina ferma, ugello sollevato di 5 mm e filamento ritratto di 2 mm
+    const auto parked = sim::steps();
+    std::this_thread::sleep_for(400ms);
+    CHECK(sim::steps().x == parked.x && sim::steps().z == parked.z && sim::steps().e == parked.e);
+    CHECK(rig.queue->getQueueSize() > 0);                             // il resto del job e' ancora in coda
+    CHECK(core::print::JobCheckpoint::load("job-pause").has_value()); // e il punto di ripresa e' su disco
+
+    CHECK(rig.manager->resumeJob());
+    CHECK(rig.waitState(core::print::JobState::COMPLETED, 120s));
+    CHECK(idle());
+
+    // Identico a una stampa mai interrotta: stessa posizione, stesso filamento estruso
+    const auto end = sim::steps();
+    CHECK(end.x == referenceSteps.x && end.y == referenceSteps.y && end.z == referenceSteps.z);
+    CHECK_MSG(end.e - eStart == referenceSteps.e, "e=" + std::to_string(end.e - eStart));
+}
+
+static void testRecoverAfterLinkFault() {
+    prepareMachine();
+    const std::string path = writePrintFile();
+    const long eStart = sim::steps().e;
+    {
+        JobRig rig;
+        CHECK(rig.manager->startPrintJob(path, "job-fault"));
+        CHECK(waitFor([&] { return sim::steps().e - eStart > 5 * E_PER_LINE; }, 60s));
+
+        // Il firmware smette di rispondere (cavo, blocco...): il job si ferma, non prosegue alla cieca
+        sim::freeze(true);
+        CHECK(rig.waitState(core::print::JobState::FAILED, 30s));
+        CHECK(rig.queue->getQueueSize() == 0);
+        sim::freeze(false);
+    }
+
+    const auto checkpoint = core::print::JobCheckpoint::load("job-fault");
+    CHECK(checkpoint.has_value());
+    if (!checkpoint) return;
+    CHECK(checkpoint->nextLine > 8 && checkpoint->positionKnown);
+
+    // Il driver viene "riavviato": nuovo gestore, che ritrova il job dal checkpoint su disco
+    JobRig rig;
+    CHECK_MSG(rig.manager->recoverJob(), rig.manager->lastRecoveryError());
+    CHECK(rig.waitState(core::print::JobState::COMPLETED, 180s));
+    CHECK(idle());
+
+    const auto end = sim::steps();
+    CHECK(end.x == referenceSteps.x && end.y == referenceSteps.y && end.z == referenceSteps.z);
+    // Al massimo viene ristampata la riga interrotta (piu' quella rimasta in volo)
+    const long extruded = end.e - eStart;
+    CHECK_MSG(extruded >= referenceSteps.e && extruded <= referenceSteps.e + 2 * E_PER_LINE,
+              "e=" + std::to_string(extruded));
+    CHECK(!core::print::JobCheckpoint::load("job-fault").has_value());
+}
+
+static void testRecoverAfterFirmwareReboot() {
+    prepareMachine();
+    const std::string path = writePrintFile();
+    JobRig rig;
+    const long eStart = sim::steps().e;
+
+    CHECK(rig.manager->startPrintJob(path, "job-reboot"));
+    CHECK(waitFor([&] { return sim::steps().e - eStart > 6 * E_PER_LINE; }, 60s));
+
+    // Watchdog: il firmware riparte da zero e perde posizione e stato
+    sim::reboot(4 /* hal::RESET_WATCHDOG */);
+    CHECK(rig.waitState(core::print::JobState::FAILED, 30s));
+    CHECK(driver->isLinkFaulted());
+
+    // X e Y vengono ritrovati sui finecorsa, Z ripreso dal checkpoint, la stampa continua
+    CHECK_MSG(rig.manager->recoverJob("job-reboot"), rig.manager->lastRecoveryError());
+    CHECK(rig.waitState(core::print::JobState::COMPLETED, 180s));
+    CHECK(idle());
+
+    const auto end = sim::steps();
+    CHECK_MSG(end.x == referenceSteps.x && end.y == referenceSteps.y,
+              "x=" + std::to_string(end.x) + " y=" + std::to_string(end.y));
+    CHECK_MSG(end.z == referenceSteps.z, "z=" + std::to_string(end.z));
+    const long extruded = end.e - eStart;
+    CHECK_MSG(extruded >= referenceSteps.e - E_PER_LINE && extruded <= referenceSteps.e + 2 * E_PER_LINE,
+              "e=" + std::to_string(extruded));
+}
+
+static void testCancelJob() {
+    prepareMachine();
+    const std::string path = writePrintFile();
+    JobRig rig;
+    const long eStart = sim::steps().e;
+
+    CHECK(rig.manager->startPrintJob(path, "job-cancel"));
+    CHECK(waitFor([&] { return sim::steps().e - eStart > 3 * E_PER_LINE; }, 60s));
+
+    const auto start = std::chrono::steady_clock::now();
+    CHECK(rig.manager->cancelJob());
+    CHECK(std::chrono::steady_clock::now() - start < 5s);
+    CHECK(idle());
+
+    const auto stopped = sim::steps();
+    std::this_thread::sleep_for(300ms);
+    CHECK(sim::steps().x == stopped.x && sim::steps().e == stopped.e); // fermo davvero
+    CHECK(rig.queue->getQueueSize() == 0);
+    CHECK(driver->getState() == core::PrintState::Idle);
+    CHECK(!core::print::JobCheckpoint::load("job-cancel").has_value()); // un job annullato non si riprende
+    CHECK(!rig.manager->recoverJob("job-cancel"));
+}
+
 // ---------------------------------------------------------------------------
 int main() {
     sim::start();
@@ -861,6 +1160,12 @@ int main() {
             {"arc and spline flattening",          testGeometry},
             {"g-code translation",                 testGCodeTranslation},
             {"queue pause and stop on fault",      testQueueStopsOnFault},
+            {"homing and endstops",                testHomingAndEndstops},
+            {"full print job from file",           testFullPrintJob},
+            {"pause, park and resume",             testPauseAndResume},
+            {"recover after link fault",           testRecoverAfterLinkFault},
+            {"recover after firmware reboot",      testRecoverAfterFirmwareReboot},
+            {"cancel job",                         testCancelJob},
     };
 
     for (const auto &[name, test]: tests) {

@@ -152,11 +152,16 @@ namespace core {
                     auto driver = translator_->getDriver();
                     const uint64_t faultsBefore = driver ? driver->faultEpoch() : 0;
 
+                    beginLine(command);
                     executeCommand(command);
                     executedCount++;
                     lastExecutionTime_ = std::chrono::steady_clock::now();
 
-                    if (driver && driver->faultEpoch() != faultsBefore) {
+                    const bool faulted = driver && driver->faultEpoch() != faultsBefore;
+                    endLine(command, faulted);
+                    persistCheckpoint(faulted); // al guasto subito, altrimenti al massimo ogni 2 s
+
+                    if (faulted) {
                         // Timeout, desync, riavvio firmware, macchina in errore o comando
                         // di job fallito: non si prosegue alla cieca.
                         haltAfterFault(command.jobId, driver->lastFaultReason());
@@ -496,41 +501,169 @@ namespace core {
         queueCondition_.notify_all();
     }
 
-    void CommandExecutorQueue::enqueueFile(const std::string &filePath, int priority, const std::string &jobId) {
+    void CommandExecutorQueue::enqueueFile(const std::string &filePath, int priority, const std::string &jobId,
+                                           size_t startLine, const std::vector<std::string> &preamble) {
         std::ifstream file(filePath);
         if (!file.is_open()) {
             Logger::logError("[CommandExecutorQueue] Cannot open file: " + filePath);
             return;
         }
 
-        std::vector<std::string> commands;
-        std::string line;
-        size_t validCommands = 0;
+        std::vector<PriorityCommand> commands;
+        for (const auto &text: preamble) {
+            PriorityCommand cmd;
+            cmd.command = text;
+            cmd.priority = priority;
+            cmd.jobId = jobId;
+            commands.push_back(cmd);
+        }
 
+        std::string line;
+        size_t lineIndex = 0;
         while (std::getline(file, line)) {
-            if (!line.empty() && line.find_first_not_of(" \t\r\n") != std::string::npos &&
-                line[0] != ';' && line[0] != '%') {
-                commands.push_back(line);
-                validCommands++;
+            const size_t index = lineIndex++;
+            if (index < startLine) continue;
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty() || line.find_first_not_of(" \t") == std::string::npos ||
+                line[0] == ';' || line[0] == '%') {
+                continue;
             }
+            PriorityCommand cmd;
+            cmd.command = line;
+            cmd.priority = priority;
+            cmd.jobId = jobId;
+            cmd.fileLine = static_cast<int64_t>(index);
+            commands.push_back(cmd);
         }
         file.close();
-
-        Logger::logInfo("[CommandExecutorQueue] File loaded: " + std::to_string(validCommands) + " commands");
 
         if (commands.empty()) {
             Logger::logWarning("[CommandExecutorQueue] No valid commands in file");
             return;
         }
 
-        // Initialize job tracking
-        auto &jobTracker = core::jobs::JobTracker::getInstance();
-        jobTracker.startJob(jobId, commands.size());
+        Logger::logInfo("[CommandExecutorQueue] File loaded: " + std::to_string(commands.size()) +
+                        " commands (from line " + std::to_string(startLine) + ")");
 
-        auto &stateTracker = core::state::StateTracker::getInstance();
-        stateTracker.resetForNewJob();
+        core::jobs::JobTracker::getInstance().startJob(jobId, commands.size());
+        if (startLine == 0) {
+            core::state::StateTracker::getInstance().resetForNewJob();
+        }
 
-        enqueueCommands(commands, priority, jobId);
+        {
+            std::lock_guard<std::mutex> lock(checkpointMutex_);
+            trackedJobId_ = jobId;
+            trackedPath_ = filePath;
+            inFlight_.clear();
+            pendingCheckpoint_.reset();
+        }
+
+        if (!running_) start();
+
+        {
+            std::lock_guard<std::mutex> lock(queueMutex_);
+            for (auto &cmd: commands) {
+                cmd.sequenceId = nextSequenceId_.fetch_add(1);
+                if (commandQueue_.size() < MAX_COMMANDS_IN_RAM) {
+                    commandQueue_.push(cmd);
+                } else if (pagingBuffer_.size() < PAGING_BUFFER_SIZE) {
+                    pagingBuffer_.push(cmd);
+                } else {
+                    flushPagingBufferToDisk();
+                    pagingBuffer_.push(cmd);
+                }
+            }
+            if (!jobId.empty()) pendingByJob_[jobId] += commands.size();
+            stats_.totalEnqueued += commands.size();
+        }
+        queueCondition_.notify_all();
+    }
+
+    // ------------------------------------------------------------------
+    // Checkpoint
+    // ------------------------------------------------------------------
+
+    print::JobCheckpoint CommandExecutorQueue::captureState(int64_t fileLine) const {
+        auto &state = core::state::StateTracker::getInstance();
+        const auto motion = state.getMotionSnapshot();
+
+        print::JobCheckpoint c;
+        c.jobId = trackedJobId_;
+        c.gcodePath = trackedPath_;
+        c.nextLine = static_cast<size_t>(fileLine);
+        c.positionKnown = motion.positionKnown;
+        c.x = motion.x;
+        c.y = motion.y;
+        c.z = motion.z;
+        c.absoluteXYZ = motion.absoluteXYZ;
+        c.absoluteE = motion.absoluteE;
+        c.e = state.getCurrentEPosition();
+        c.feedrate = state.getCurrentFeedRate();
+        c.hotendTarget = state.getHotendTargetTemp();
+        c.fanSpeed = state.getCurrentFanSpeed();
+        c.layer = state.getCurrentLayer();
+        return c;
+    }
+
+    void CommandExecutorQueue::beginLine(const PriorityCommand &cmd) {
+        std::lock_guard<std::mutex> lock(checkpointMutex_);
+        if (cmd.fileLine < 0 || cmd.jobId != trackedJobId_) return;
+        auto driver = translator_->getDriver();
+        inFlight_.push_back({captureState(cmd.fileLine), 0, driver ? driver->sequenceEpoch() : 0, false});
+    }
+
+    void CommandExecutorQueue::endLine(const PriorityCommand &cmd, bool faulted) {
+        std::lock_guard<std::mutex> lock(checkpointMutex_);
+        if (cmd.fileLine < 0 || cmd.jobId != trackedJobId_ || inFlight_.empty()) return;
+        auto driver = translator_->getDriver();
+        if (!driver) return;
+
+        if (!faulted) {
+            inFlight_.back().lastCommand = driver->lastIssuedCommand();
+            inFlight_.back().issued = true;
+        }
+
+        // Una riga e' completata quando il firmware ha ESEGUITO il suo ultimo comando
+        // (campo D della risposta), non quando lo ha solo accodato. Vale anche dopo un
+        // guasto: la riga interrotta resta (non e' "issued"), quelle prima vengono scartate.
+        const uint32_t completed = driver->lastCompletedCommand();
+        const uint32_t epoch = driver->sequenceEpoch();
+        while (!inFlight_.empty() && inFlight_.front().issued &&
+               inFlight_.front().sequenceEpoch == epoch && inFlight_.front().lastCommand <= completed) {
+            inFlight_.pop_front();
+        }
+
+        // Punto di ripresa: la prima riga non ancora completata, altrimenti la successiva
+        pendingCheckpoint_ = inFlight_.empty() ? captureState(cmd.fileLine + 1) : inFlight_.front().start;
+    }
+
+    void CommandExecutorQueue::persistCheckpoint(bool force) {
+        std::optional<print::JobCheckpoint> checkpoint;
+        {
+            std::lock_guard<std::mutex> lock(checkpointMutex_);
+            if (!pendingCheckpoint_) return;
+            const auto now = std::chrono::steady_clock::now();
+            if (!force && now - lastCheckpointSave_ < std::chrono::seconds(2)) return;
+            lastCheckpointSave_ = now;
+            checkpoint = pendingCheckpoint_;
+        }
+        checkpoint->save();
+    }
+
+    void CommandExecutorQueue::saveCheckpointNow() {
+        persistCheckpoint(true);
+    }
+
+    void CommandExecutorQueue::forgetJob(const std::string &jobId) {
+        {
+            std::lock_guard<std::mutex> lock(checkpointMutex_);
+            if (trackedJobId_ == jobId) {
+                trackedJobId_.clear();
+                inFlight_.clear();
+                pendingCheckpoint_.reset();
+            }
+        }
+        print::JobCheckpoint::remove(jobId);
     }
 
     size_t CommandExecutorQueue::getQueueSize() const {
