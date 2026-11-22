@@ -128,7 +128,14 @@ namespace core::print {
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &outFile);
-        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progressCallback);
+        // curl_off_t e' "long" su Linux a 64 bit e "long long" su Windows: l'adattatore
+        // rende la callback valida su entrambi senza esporre gli header di curl nell'.hpp
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION,
+                         static_cast<int (*)(void *, curl_off_t, curl_off_t, curl_off_t, curl_off_t)>(
+                                 [](void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal,
+                                    curl_off_t ulnow) {
+                                     return GCodeDownloader::progressCallback(clientp, dltotal, dlnow, ultotal, ulnow);
+                                 }));
         curl_easy_setopt(curl, CURLOPT_XFERINFODATA, this);
         curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
 
@@ -194,8 +201,8 @@ namespace core::print {
         return totalSize;
     }
 
-    int GCodeDownloader::progressCallback(void *clientp, curl_off_t dltotal, curl_off_t dlnow,
-                                          curl_off_t ultotal, curl_off_t ulnow) {
+    int GCodeDownloader::progressCallback(void *clientp, long long dltotal, long long dlnow,
+                                          long long ultotal, long long ulnow) {
         (void) ultotal;
         (void) ulnow;
 
