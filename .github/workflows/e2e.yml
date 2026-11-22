@@ -1,0 +1,25 @@
+name: e2e
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  firmware-driver:
+    # Firmware reale (compilato per PC su scheda simulata) contro il core reale del driver.
+    # Gira in entrambi i repository: una modifica al protocollo da un lato solo rompe la build.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout driver
+        uses: actions/checkout@v4
+        with:
+          repository: AEndrix03/3DP-Driver-Core
+          path: 3DP-Driver-Core
+      - name: Checkout firmware
+        uses: actions/checkout@v4
+        with:
+          repository: AEndrix03/3D-Printer-Firmware
+          path: 3D-Printer-Firmware
+      - name: Run end-to-end tests
+        run: bash 3DP-Driver-Core/tests/integration/run.sh 3D-Printer-Firmware

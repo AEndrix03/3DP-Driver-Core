@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
+#include <functional>
 #include <iostream>
 #include <mutex>
 #include <thread>
@@ -220,6 +221,7 @@ static void testBootAndStatus() {
     CHECK(diag.isSuccess());
     CHECK(contains(diag, "DIA "));
     CHECK(contains(diag, "POWERON"));
+    CHECK(contains(diag, "PRF ")); // picco di stack, durata interrupt step, scadenze mancate
 }
 
 static void testRejectedIsNotSuccess() {
