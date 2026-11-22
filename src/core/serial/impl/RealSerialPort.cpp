@@ -199,7 +199,7 @@ namespace core {
                                std::to_string(bytes_written) + "/" + std::to_string(message.length()));
         }
 
-        Logger::logInfo("[TX] " + data);
+        if (Logger::isTraceEnabled()) Logger::logTrace("[TX] " + data);
     }
 
     bool RealSerialPort::extractLine(std::string &line) {
@@ -212,7 +212,7 @@ namespace core {
                 line.pop_back();
             }
             if (!line.empty()) {
-                Logger::logInfo("[RX] " + line);
+                if (Logger::isTraceEnabled()) Logger::logTrace("[RX] " + line);
                 return true;
             }
         }

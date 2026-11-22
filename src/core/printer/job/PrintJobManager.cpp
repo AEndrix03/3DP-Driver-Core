@@ -1,4 +1,5 @@
 #include "core/printer/job/PrintJobManager.hpp"
+#include "core/printer/state/StateTracker.hpp"
 #include "core/printer/job/tracking/JobTracker.hpp"
 #include "logger/Logger.hpp"
 #include <cmath>
@@ -413,10 +414,13 @@ namespace core::print {
             progress.estimated = std::chrono::seconds(static_cast<long>(totalTime));
         }
 
-        // Get current position
-        auto pos = driver_->motion()->getPosition();
-        if (pos) {
-            progress.currentPosition = *pos;
+        // Posizione dallo stato tenuto dal traduttore: interrogare il firmware qui
+        // metterebbe un comando in piu' sulla seriale a ogni richiesta di avanzamento.
+        const auto motion = core::state::StateTracker::getInstance().getMotionSnapshot();
+        if (motion.positionKnown) {
+            progress.currentPosition.x = motion.x;
+            progress.currentPosition.y = motion.y;
+            progress.currentPosition.z = motion.z;
         }
 
         return progress;

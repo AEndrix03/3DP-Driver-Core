@@ -5,6 +5,7 @@
 #include "logger/Logger.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <iostream>
 #include <chrono>
 #include <iomanip>
@@ -23,12 +24,15 @@ std::atomic<size_t> Logger::currentLogSize_{0};
 std::atomic<bool> Logger::rotationEnabled_{true};
 std::thread Logger::cleanupThread_;
 std::atomic<bool> Logger::shutdownRequested_{false};
+std::atomic<bool> Logger::traceEnabled_{false};
 
 constexpr size_t MAX_LOG_SIZE = 50 * 1024 * 1024; // 50MB
 constexpr size_t MAX_LOG_FILES = 10;
 constexpr std::chrono::hours LOG_RETENTION{24 * 7}; // 7 days
 
 void Logger::init() {
+    const char *trace = std::getenv("DRIVER_SERIAL_TRACE");
+    traceEnabled_ = trace != nullptr && std::string(trace) == "1";
     rotateLogFile();
     startCleanupThread();
     std::cout << "[Logger] Initialized with auto-rotation (max " << MAX_LOG_SIZE / 1024 / 1024 << "MB)" << std::endl;
@@ -47,6 +51,10 @@ void Logger::shutdown() {
 
 void Logger::logInfo(const std::string &message) {
     log("INFO", message);
+}
+
+void Logger::logTrace(const std::string &message) {
+    if (isTraceEnabled()) log("TRACE", message);
 }
 
 void Logger::logWarning(const std::string &message) {

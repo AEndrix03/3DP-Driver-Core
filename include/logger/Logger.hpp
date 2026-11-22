@@ -22,7 +22,17 @@ public:
 
     static void logError(const std::string &message);
 
+    /**
+     * Traccia dettagliata (ogni riga inviata e ricevuta sulla seriale). Spenta di default:
+     * in stampa sono centinaia di righe al secondo. Si accende con la variabile
+     * d'ambiente DRIVER_SERIAL_TRACE=1.
+     */
+    static void logTrace(const std::string &message);
+
+    static bool isTraceEnabled() { return traceEnabled_.load(std::memory_order_relaxed); }
+
 private:
+    static std::atomic<bool> traceEnabled_;
     static std::ofstream logFile_;
     static std::mutex logMutex_;
     static std::string currentLogPath_;

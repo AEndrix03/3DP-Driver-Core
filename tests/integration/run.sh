@@ -6,6 +6,7 @@
 # niente Boost, Kafka o vcpkg.
 #
 #   tests/integration/run.sh [percorso del repo 3D-Printer-Firmware]
+#   ONLY="travel limits" tests/integration/run.sh   -> solo gli scenari il cui nome contiene il testo
 set -euo pipefail
 
 DRIVER_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -88,4 +89,4 @@ esac
 
 # La coda comandi crea temp/command_queue.dat nella directory corrente
 cd "$BUILD_DIR/work"
-"$BUILD_DIR/firmware_link_test"
+"$BUILD_DIR/firmware_link_test" ${ONLY:+"$ONLY"}

@@ -11,24 +11,16 @@
 #include "core/printer/state/StateTracker.hpp"
 
 namespace core {
-    static constexpr size_t MAX_COMMANDS_IN_RAM = 10000;
-    static constexpr size_t PAGING_BUFFER_SIZE = 5000;
-    static constexpr size_t RELOAD_THRESHOLD = 100;
-    static constexpr size_t RELOAD_BATCH_SIZE = 1000;
-
     CommandExecutorQueue::CommandExecutorQueue(std::shared_ptr<translator::gcode::GCodeTranslator> translator)
             : translator_(std::move(translator)), running_(false), stopping_(false),
               lastExecutionTime_(std::chrono::steady_clock::now()) {
         if (!translator_) {
             throw std::invalid_argument("GCodeTranslator cannot be null");
         }
-        initDiskFile();
-        Logger::logInfo("[CommandExecutorQueue] Created with advanced paging system");
     }
 
     CommandExecutorQueue::~CommandExecutorQueue() {
         stop();
-        closeDiskFile();
     }
 
     void CommandExecutorQueue::start() {
@@ -103,7 +95,6 @@ namespace core {
         processingThreadId_ = std::this_thread::get_id();
 
         size_t executedCount = 0;
-        size_t executedSinceReload = 0;
         auto lastLogTime = std::chrono::steady_clock::now();
 
         try {
@@ -120,32 +111,18 @@ namespace core {
                     // Check if stopping
                     if (stopping_) break;
 
-                    // Progressive reload logic with timeout
-                    if (executedSinceReload >= RELOAD_THRESHOLD) {
-                        if (!loadFromAllSourcesSafe()) {
-                            Logger::logWarning("[CommandExecutorQueue] Load from sources failed - continuing");
+                    std::string brokenJob;
+                    if (!takeNext(command, brokenJob)) {
+                        if (brokenJob.empty()) {
+                            // coda vuota, oppure in pausa con soli comandi di job in attesa
+                            queueCondition_.wait_for(lock, std::chrono::milliseconds(500));
+                            continue;
                         }
-                        executedSinceReload = 0;
-                    }
-
-                    // Force reload if queue is low but commands available
-                    if (commandQueue_.size() < RELOAD_BATCH_SIZE) {
-                        loadFromAllSourcesSafe();
-                    }
-
-                    // In pausa passano solo i comandi urgenti (priorita' < 3)
-                    const bool nothingRunnable = commandQueue_.empty() ||
-                                                 (paused_ && commandQueue_.top().priority >= 3);
-                    if (nothingRunnable) {
-                        queueCondition_.wait_for(lock, std::chrono::milliseconds(500));
+                        lock.unlock();
+                        haltAfterFault(brokenJob, "g-code file ended before the expected number of lines");
                         continue;
                     }
-
-                    // Get next command
-                    command = commandQueue_.top();
-                    commandQueue_.pop();
                     hasCommand = true;
-                    executedSinceReload++;
                 }
 
                 if (hasCommand) {
@@ -282,11 +259,10 @@ namespace core {
         size_t dropped = 0;
         {
             std::lock_guard<std::mutex> lock(queueMutex_);
-            std::lock_guard<std::mutex> diskLock(diskMutex_);
-            dropped = commandQueue_.size() + pagingBuffer_.size() + diskQueue_.size();
+            dropped = commandQueue_.size();
+            for (const auto &source: files_) dropped += source->remaining;
             commandQueue_ = std::priority_queue<PriorityCommand>();
-            pagingBuffer_ = std::priority_queue<PriorityCommand>();
-            diskQueue_.clear();
+            files_.clear();
             pendingByJob_.clear();
         }
 
@@ -342,75 +318,76 @@ namespace core {
         jobFinishedCallback_ = std::move(callback);
     }
 
-    // Rest of the methods remain the same but with FIXED locking order
     size_t CommandExecutorQueue::getTotalCommandsAvailable() const {
-        size_t ramAndBuffer = 0;
-        {
-            std::lock_guard<std::mutex> lock(queueMutex_);
-            ramAndBuffer = commandQueue_.size() + pagingBuffer_.size();
-        }
-        size_t disk = 0;
-        {
-            std::lock_guard<std::mutex> diskLock(diskMutex_);
-            disk = diskQueue_.size();
-        }
-        return ramAndBuffer + disk;
+        std::lock_guard<std::mutex> lock(queueMutex_);
+        size_t total = commandQueue_.size();
+        for (const auto &source: files_) total += source->remaining;
+        return total;
     }
 
-    void CommandExecutorQueue::loadFromAllSources() {
-        // FIXED: Only call when already holding queueMutex_
-        size_t currentSize = commandQueue_.size();
-        if (currentSize >= RELOAD_BATCH_SIZE) return;
-
-        size_t toLoad = std::min(RELOAD_BATCH_SIZE, MAX_COMMANDS_IN_RAM - currentSize);
-        size_t loadedFromBuffer = 0;
-
-        // Load from paging buffer first
-        while (!pagingBuffer_.empty() && loadedFromBuffer < toLoad) {
-            commandQueue_.push(pagingBuffer_.top());
-            pagingBuffer_.pop();
-            loadedFromBuffer++;
-        }
-
-        // Load from disk if needed
-        if (loadedFromBuffer < toLoad) {
-            std::lock_guard<std::mutex> diskLock(diskMutex_);
-            size_t diskToLoad = toLoad - loadedFromBuffer;
-            size_t loadedFromDisk = 0;
-
-            while (!diskQueue_.empty() && loadedFromDisk < diskToLoad) {
-                commandQueue_.push(diskQueue_.front());
-                diskQueue_.pop_front();
-                loadedFromDisk++;
-            }
-
-            if (loadedFromBuffer > 0 || loadedFromDisk > 0) {
-                Logger::logInfo("[CommandExecutorQueue] Loaded " + std::to_string(loadedFromBuffer) +
-                                " from buffer, " + std::to_string(loadedFromDisk) + " from disk");
-            }
-        }
+    bool CommandExecutorQueue::isSkippable(const std::string &line) {
+        return line.empty() || line.find_first_not_of(" \t") == std::string::npos ||
+               line[0] == ';' || line[0] == '%';
     }
 
-    void CommandExecutorQueue::forceLoadFromDisk() {
-        // FIXED: Only call when already holding queueMutex_
-        while (!pagingBuffer_.empty() && commandQueue_.size() < MAX_COMMANDS_IN_RAM) {
-            commandQueue_.push(pagingBuffer_.top());
-            pagingBuffer_.pop();
+    bool CommandExecutorQueue::nextFromFile(FileSource &source, PriorityCommand &cmd) {
+        cmd.priority = source.priority;
+        cmd.jobId = source.jobId;
+        cmd.fileLine = -1;
+
+        if (!source.preamble.empty()) {
+            cmd.command = std::move(source.preamble.front());
+            source.preamble.pop_front();
+            return true;
         }
 
-        {
-            std::lock_guard<std::mutex> diskLock(diskMutex_);
-            size_t loaded = 0;
-            while (!diskQueue_.empty() && commandQueue_.size() < MAX_COMMANDS_IN_RAM && loaded < RELOAD_BATCH_SIZE) {
-                commandQueue_.push(diskQueue_.front());
-                diskQueue_.pop_front();
-                loaded++;
-            }
-            if (loaded > 0) {
-                Logger::logInfo(
-                        "[CommandExecutorQueue] Force loaded " + std::to_string(loaded) + " commands from disk");
-            }
+        std::string line;
+        while (std::getline(source.file, line)) {
+            const size_t index = source.nextIndex++;
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (isSkippable(line)) continue;
+            cmd.command = std::move(line);
+            cmd.fileLine = static_cast<int64_t>(index);
+            return true;
         }
+
+        if (!source.ending.empty()) {
+            cmd.command = std::move(source.ending.front());
+            source.ending.pop_front();
+            return true;
+        }
+        return false;
+    }
+
+    bool CommandExecutorQueue::takeNext(PriorityCommand &cmd, std::string &brokenJob) {
+        FileSource *source = files_.empty() ? nullptr : files_.front().get();
+        const bool hasSingle = !commandQueue_.empty();
+        if (!source && !hasSingle) return false;
+
+        // Tra un comando singolo e il job vince la priorita' piu' alta, poi chi e' arrivato prima
+        const bool useSingle = hasSingle &&
+                               (!source || commandQueue_.top().priority < source->priority ||
+                                (commandQueue_.top().priority == source->priority &&
+                                 commandQueue_.top().sequenceId < source->sequenceId));
+
+        // In pausa passano solo i comandi urgenti (priorita' < 3)
+        const int priority = useSingle ? commandQueue_.top().priority : source->priority;
+        if (paused_ && priority >= 3) return false;
+
+        if (useSingle) {
+            cmd = commandQueue_.top();
+            commandQueue_.pop();
+            return true;
+        }
+
+        if (!nextFromFile(*source, cmd)) {
+            brokenJob = source->jobId;
+            files_.pop_front();
+            return false;
+        }
+        cmd.sequenceId = nextSequenceId_.fetch_add(1);
+        if (--source->remaining == 0) files_.pop_front();
+        return true;
     }
 
     void CommandExecutorQueue::enqueue(const std::string &command, int priority, const std::string &jobId) {
@@ -438,21 +415,7 @@ namespace core {
 
             if (!jobId.empty()) pendingByJob_[jobId]++;
 
-            // High priority goes directly to RAM
-            if (priority < 3) {
-                commandQueue_.push(cmd);
-                Logger::logInfo("[CommandExecutorQueue] High priority command enqueued");
-            } else {
-                // Normal priority follows standard flow
-                if (commandQueue_.size() < MAX_COMMANDS_IN_RAM) {
-                    commandQueue_.push(cmd);
-                } else if (pagingBuffer_.size() < PAGING_BUFFER_SIZE) {
-                    pagingBuffer_.push(cmd);
-                } else {
-                    flushPagingBufferToDisk();
-                    pagingBuffer_.push(cmd);
-                }
-            }
+            commandQueue_.push(cmd);
             updateStats(false, false);
         }
 
@@ -481,14 +444,7 @@ namespace core {
                     cmd.jobId = jobId;
                     cmd.sequenceId = nextSequenceId_.fetch_add(1);
 
-                    if (commandQueue_.size() < MAX_COMMANDS_IN_RAM) {
-                        commandQueue_.push(cmd);
-                    } else if (pagingBuffer_.size() < PAGING_BUFFER_SIZE) {
-                        pagingBuffer_.push(cmd);
-                    } else {
-                        flushPagingBufferToDisk();
-                        pagingBuffer_.push(cmd);
-                    }
+                    commandQueue_.push(cmd);
                     enqueuedCount++;
                 }
             }
@@ -504,61 +460,55 @@ namespace core {
     void CommandExecutorQueue::enqueueFile(const std::string &filePath, int priority, const std::string &jobId,
                                            size_t startLine, const std::vector<std::string> &preamble,
                                            const std::string &endGCode) {
-        std::ifstream file(filePath);
-        if (!file.is_open()) {
-            Logger::logError("[CommandExecutorQueue] Cannot open file: " + filePath);
-            return;
-        }
+        auto source = std::make_unique<FileSource>();
+        source->jobId = jobId;
+        source->priority = priority;
 
-        std::vector<PriorityCommand> commands;
-        for (const auto &text: preamble) {
-            PriorityCommand cmd;
-            cmd.command = text;
-            cmd.priority = priority;
-            cmd.jobId = jobId;
-            commands.push_back(cmd);
-        }
-
-        std::string line;
-        size_t lineIndex = 0;
-        while (std::getline(file, line)) {
-            const size_t index = lineIndex++;
-            if (index < startLine) continue;
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            if (line.empty() || line.find_first_not_of(" \t") == std::string::npos ||
-                line[0] == ';' || line[0] == '%') {
-                continue;
+        // Primo passaggio: si contano i comandi (servono per l'avanzamento e per sapere
+        // quando il job e' finito) senza tenerli in memoria.
+        size_t fileCommands = 0;
+        {
+            std::ifstream counter(filePath);
+            if (!counter.is_open()) {
+                Logger::logError("[CommandExecutorQueue] Cannot open file: " + filePath);
+                return;
             }
-            PriorityCommand cmd;
-            cmd.command = line;
-            cmd.priority = priority;
-            cmd.jobId = jobId;
-            cmd.fileLine = static_cast<int64_t>(index);
-            commands.push_back(cmd);
+            std::string line;
+            size_t index = 0;
+            while (std::getline(counter, line)) {
+                if (index++ < startLine) continue;
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (!isSkippable(line)) ++fileCommands;
+            }
         }
-        file.close();
+
+        for (const auto &text: preamble) {
+            if (!isSkippable(text)) source->preamble.push_back(text);
+        }
 
         // G-code di fine stampa: in coda al job, dopo l'ultima riga del file
         std::istringstream endStream(endGCode);
+        std::string line;
         while (std::getline(endStream, line)) {
             if (!line.empty() && line.back() == '\r') line.pop_back();
-            if (line.empty() || line.find_first_not_of(" \t") == std::string::npos || line[0] == ';') continue;
-            PriorityCommand cmd;
-            cmd.command = line;
-            cmd.priority = priority;
-            cmd.jobId = jobId;
-            commands.push_back(cmd);
+            if (!isSkippable(line)) source->ending.push_back(line);
         }
 
-        if (commands.empty()) {
+        source->remaining = source->preamble.size() + fileCommands + source->ending.size();
+        if (source->remaining == 0) {
             Logger::logWarning("[CommandExecutorQueue] No valid commands in file");
             return;
         }
 
-        Logger::logInfo("[CommandExecutorQueue] File loaded: " + std::to_string(commands.size()) +
+        // Secondo passaggio, pigro: il file resta aperto e posizionato sulla riga di partenza
+        source->file.open(filePath);
+        for (size_t skipped = 0; skipped < startLine && std::getline(source->file, line); ++skipped) {}
+        source->nextIndex = startLine;
+
+        Logger::logInfo("[CommandExecutorQueue] File queued: " + std::to_string(source->remaining) +
                         " commands (from line " + std::to_string(startLine) + ")");
 
-        core::jobs::JobTracker::getInstance().startJob(jobId, commands.size());
+        core::jobs::JobTracker::getInstance().startJob(jobId, source->remaining);
         if (startLine == 0) {
             core::state::StateTracker::getInstance().resetForNewJob();
         }
@@ -576,19 +526,10 @@ namespace core {
 
         {
             std::lock_guard<std::mutex> lock(queueMutex_);
-            for (auto &cmd: commands) {
-                cmd.sequenceId = nextSequenceId_.fetch_add(1);
-                if (commandQueue_.size() < MAX_COMMANDS_IN_RAM) {
-                    commandQueue_.push(cmd);
-                } else if (pagingBuffer_.size() < PAGING_BUFFER_SIZE) {
-                    pagingBuffer_.push(cmd);
-                } else {
-                    flushPagingBufferToDisk();
-                    pagingBuffer_.push(cmd);
-                }
-            }
-            if (!jobId.empty()) pendingByJob_[jobId] += commands.size();
-            stats_.totalEnqueued += commands.size();
+            source->sequenceId = nextSequenceId_.fetch_add(1);
+            if (!jobId.empty()) pendingByJob_[jobId] += source->remaining;
+            stats_.totalEnqueued += source->remaining;
+            files_.push_back(std::move(source));
         }
         queueCondition_.notify_all();
     }
@@ -687,15 +628,13 @@ namespace core {
 
     void CommandExecutorQueue::clearQueue() {
         std::lock_guard<std::mutex> lock(queueMutex_);
-        std::lock_guard<std::mutex> diskLock(diskMutex_);
 
-        size_t clearedCount = commandQueue_.size() + pagingBuffer_.size() + diskQueue_.size();
+        size_t clearedCount = commandQueue_.size();
+        for (const auto &source: files_) clearedCount += source->remaining;
 
         std::priority_queue<PriorityCommand> emptyQueue;
         commandQueue_.swap(emptyQueue);
-        std::priority_queue<PriorityCommand> emptyBuffer;
-        pagingBuffer_.swap(emptyBuffer);
-        diskQueue_.clear();
+        files_.clear();
         pendingByJob_.clear();
 
         if (clearedCount > 0) {
@@ -710,24 +649,6 @@ namespace core {
         return result;
     }
 
-    void CommandExecutorQueue::flushPagingBufferToDisk() {
-        if (pagingBuffer_.empty()) return;
-
-        std::lock_guard<std::mutex> diskLock(diskMutex_);
-        size_t flushedCount = 0;
-
-        while (!pagingBuffer_.empty()) {
-            PriorityCommand cmd = pagingBuffer_.top();
-            pagingBuffer_.pop();
-            diskQueue_.push_back(cmd);
-            saveToDisk(cmd);
-            flushedCount++;
-        }
-
-        stats_.diskPagedCommands += flushedCount;
-        stats_.diskOperations++;
-    }
-
     void CommandExecutorQueue::updateStats(bool executed, bool error) {
         std::lock_guard<std::mutex> lock(statsMutex_);
         if (!executed && !error) {
@@ -738,140 +659,4 @@ namespace core {
             stats_.totalErrors++;
         }
     }
-
-    void CommandExecutorQueue::saveToDisk(const PriorityCommand &cmd) {
-        if (diskFile_.is_open()) {
-            diskFile_.write(reinterpret_cast<const char *>(&cmd.priority), sizeof(cmd.priority));
-            diskFile_.write(reinterpret_cast<const char *>(&cmd.sequenceId), sizeof(cmd.sequenceId));
-
-            size_t cmdSize = cmd.command.size();
-            diskFile_.write(reinterpret_cast<const char *>(&cmdSize), sizeof(cmdSize));
-            diskFile_.write(cmd.command.c_str(), cmdSize);
-
-            size_t jobSize = cmd.jobId.size();
-            diskFile_.write(reinterpret_cast<const char *>(&jobSize), sizeof(jobSize));
-            diskFile_.write(cmd.jobId.c_str(), jobSize);
-
-            diskFile_.flush();
-        }
-    }
-
-    bool CommandExecutorQueue::loadFromDisk(PriorityCommand &cmd) {
-        if (!diskFile_.is_open()) return false;
-
-        if (!diskFile_.read(reinterpret_cast<char *>(&cmd.priority), sizeof(cmd.priority))) return false;
-        if (!diskFile_.read(reinterpret_cast<char *>(&cmd.sequenceId), sizeof(cmd.sequenceId))) return false;
-
-        size_t cmdSize;
-        if (!diskFile_.read(reinterpret_cast<char *>(&cmdSize), sizeof(cmdSize))) return false;
-        cmd.command.resize(cmdSize);
-        if (!diskFile_.read(&cmd.command[0], cmdSize)) return false;
-
-        size_t jobSize;
-        if (!diskFile_.read(reinterpret_cast<char *>(&jobSize), sizeof(jobSize))) return false;
-        cmd.jobId.resize(jobSize);
-        if (!diskFile_.read(&cmd.jobId[0], jobSize)) return false;
-
-        stats_.diskOperations++;
-        return true;
-    }
-
-    void CommandExecutorQueue::initDiskFile() {
-        std::filesystem::create_directories("temp");
-        std::string diskPath = "temp/command_queue.dat";
-
-        if (std::filesystem::exists(diskPath)) {
-            std::filesystem::remove(diskPath);
-        }
-
-        diskFile_.open(diskPath, std::ios::binary | std::ios::in | std::ios::out | std::ios::app);
-        if (!diskFile_.is_open()) {
-            Logger::logWarning("[CommandExecutorQueue] Could not open disk file");
-        } else {
-            Logger::logInfo("[CommandExecutorQueue] Disk file initialized: " + diskPath);
-        }
-    }
-
-    void CommandExecutorQueue::closeDiskFile() {
-        if (diskFile_.is_open()) {
-            diskFile_.close();
-            std::filesystem::remove("temp/command_queue.dat");
-        }
-    }
-
-    void CommandExecutorQueue::recoverFromStall() {
-        Logger::logInfo("[CommandExecutorQueue] Attempting standard stall recovery");
-
-        // Clear any potential deadlock by aggressive loading
-        {
-            std::lock_guard<std::mutex> lock(queueMutex_);
-            loadFromAllSourcesSafe();
-        }
-
-        // Wake up processing thread multiple times
-        for (int i = 0; i < 10; ++i) {
-            queueCondition_.notify_all();
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-    }
-
-    bool CommandExecutorQueue::loadFromAllSourcesSafe() {
-        try {
-            // FIXED: Acquire locks in consistent order to prevent deadlock
-            size_t currentSize = commandQueue_.size();
-            if (currentSize >= RELOAD_BATCH_SIZE) return true;
-
-            size_t toLoad = std::min(RELOAD_BATCH_SIZE, MAX_COMMANDS_IN_RAM - currentSize);
-            size_t loadedFromBuffer = 0;
-
-            // Load from paging buffer first (no additional locking needed)
-            while (!pagingBuffer_.empty() && loadedFromBuffer < toLoad) {
-                commandQueue_.push(pagingBuffer_.top());
-                pagingBuffer_.pop();
-                loadedFromBuffer++;
-            }
-
-            // Load from disk if needed (avoid deadlock with timeout approach)
-            if (loadedFromBuffer < toLoad) {
-                bool diskLockAcquired = false;
-                auto startTime = std::chrono::steady_clock::now();
-
-                // Try to acquire disk lock with manual timeout
-                while (!diskLockAcquired &&
-                       (std::chrono::steady_clock::now() - startTime) < std::chrono::milliseconds(50)) {
-                    std::unique_lock<std::mutex> diskLock(diskMutex_, std::try_to_lock);
-                    if (diskLock.owns_lock()) {
-                        diskLockAcquired = true;
-
-                        size_t diskToLoad = toLoad - loadedFromBuffer;
-                        size_t loadedFromDisk = 0;
-
-                        while (!diskQueue_.empty() && loadedFromDisk < diskToLoad) {
-                            commandQueue_.push(diskQueue_.front());
-                            diskQueue_.pop_front();
-                            loadedFromDisk++;
-                        }
-
-                        if (loadedFromBuffer > 0 || loadedFromDisk > 0) {
-                            Logger::logInfo("[CommandExecutorQueue] Loaded " + std::to_string(loadedFromBuffer) +
-                                            " from buffer, " + std::to_string(loadedFromDisk) + " from disk");
-                        }
-                        break;
-                    }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                }
-
-                if (!diskLockAcquired) {
-                    Logger::logWarning("[CommandExecutorQueue] Disk lock timeout - skipping disk load");
-                    return false;
-                }
-            }
-
-            return true;
-        } catch (const std::exception &e) {
-            Logger::logError("[CommandExecutorQueue] loadFromAllSourcesSafe failed: " + std::string(e.what()));
-            return false;
-        }
-    }
-
 } // namespace core

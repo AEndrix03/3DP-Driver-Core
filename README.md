@@ -19,6 +19,7 @@ make
 
 ```bash
 tests/integration/run.sh [percorso del repo 3D-Printer-Firmware]
+ONLY="travel limits" tests/integration/run.sh   # solo gli scenari il cui nome contiene il testo
 ```
 
 Compila il firmware reale su PC (scheda simulata: seriale, pin, timer degli step, finecorsa,
@@ -65,6 +66,14 @@ della macchina all'inizio di quella riga: posizione, E, velocita', modalita', te
   (che devono essere abilitati), Z viene assunto fermo dove era. Senza finecorsa la ripresa viene
   rifiutata.
 - Viene ristampata al massimo la riga interrotta.
+
+### Coda dei comandi e log
+
+- Un job viene letto dal file G-code **riga per riga mentre viene eseguito**: in memoria c'e' solo la
+  riga corrente, qualunque sia la dimensione del file, e l'ordine di esecuzione e' quello del file.
+- La richiesta di avanzamento non interroga il firmware: usa la posizione tenuta dal traduttore.
+- Le righe inviate e ricevute sulla seriale non vengono scritte nel log (in stampa sono centinaia al
+  secondo). Per vederle: variabile d'ambiente `DRIVER_SERIAL_TRACE=1`.
 
 ### Comandi dal backend (Kafka)
 

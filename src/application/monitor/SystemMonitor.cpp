@@ -88,7 +88,6 @@ void SystemMonitor::reportKafkaStats() const {
         Logger::logInfo("  Total Executed: " + std::to_string(stats.totalExecuted));
         Logger::logInfo("  Current Queue Size: " + std::to_string(stats.currentQueueSize));
         Logger::logInfo("  Errors: " + std::to_string(stats.totalErrors));
-        Logger::logInfo("  Disk Operations: " + std::to_string(stats.diskOperations));
 
         if (!isRunning && stats.currentQueueSize > 0) {
             Logger::logError("[SystemMonitor] WARNING: Queue has commands but is not running!");

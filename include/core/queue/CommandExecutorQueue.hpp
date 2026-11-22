@@ -95,8 +95,6 @@ namespace core {
             size_t totalExecuted = 0;
             size_t totalErrors = 0;
             size_t currentQueueSize = 0;
-            size_t diskPagedCommands = 0;
-            size_t diskOperations = 0;
         };
 
         Statistics getStatistics() const;
@@ -117,12 +115,25 @@ namespace core {
 
     private:
         std::shared_ptr<translator::gcode::GCodeTranslator> translator_;
-        std::priority_queue<PriorityCommand> commandQueue_;      // 10k commands in RAM
-        std::priority_queue<PriorityCommand> pagingBuffer_;      // 5k intermediate buffer
-        std::deque<PriorityCommand> diskQueue_;                  // On-disk storage
-        std::fstream diskFile_;
+        std::priority_queue<PriorityCommand> commandQueue_;      // comandi singoli (manuali, urgenti)
+
+        /**
+         * Un job da file viene letto riga per riga mentre viene eseguito: in memoria
+         * c'e' sempre e solo la riga corrente, qualunque sia la dimensione del file,
+         * e l'ordine di esecuzione e' per costruzione quello del file.
+         */
+        struct FileSource {
+            std::ifstream file;
+            std::deque<std::string> preamble; ///< comandi da eseguire prima del file
+            std::deque<std::string> ending;   ///< G-code di fine stampa, dopo l'ultima riga
+            std::string jobId;
+            int priority = 5;
+            uint64_t sequenceId = 0;          ///< posizione rispetto ai comandi singoli di pari priorita'
+            size_t nextIndex = 0;             ///< indice della prossima riga del file
+            size_t remaining = 0;             ///< comandi ancora da consegnare
+        };
+        std::deque<std::unique_ptr<FileSource>> files_;          // protetto da queueMutex_
         mutable std::mutex queueMutex_;
-        mutable std::mutex diskMutex_;
         std::condition_variable queueCondition_;
         std::thread processingThread_;
         std::thread healthThread_;                               // Health monitor thread
@@ -176,22 +187,21 @@ namespace core {
 
         void healthMonitorLoop();                                // Health check loop
         size_t getTotalCommandsAvailable() const;                // Get total pending commands
-        void loadFromAllSources();
 
-        void forceLoadFromDisk();                                // Force aggressive loading
-        void flushPagingBufferToDisk();                          // Flush buffer to disk
+        /// true se la riga non e' un comando (vuota o commento).
+        static bool isSkippable(const std::string &line);
 
-        void closeDiskFile();
+        /// Prossimo comando del job da file; false se il file finisce prima del previsto.
+        static bool nextFromFile(FileSource &source, PriorityCommand &cmd);
 
-        void initDiskFile();
-
-        bool loadFromDisk(PriorityCommand &cmd);
-
-        void saveToDisk(const PriorityCommand &cmd);
+        /**
+         * Prossimo comando eseguibile (con queueMutex_ gia' preso).
+         * @param brokenJob valorizzato se un file e' finito prima del previsto
+         * @return false se non c'e' nulla da eseguire ora
+         */
+        bool takeNext(PriorityCommand &cmd, std::string &brokenJob);
 
         void updateStats(bool executed, bool error);
-
-        void pageCommandsToDisk();
 
         void executeCommand(const PriorityCommand &cmd);
 
@@ -200,9 +210,5 @@ namespace core {
 
         /// Aggiorna il conteggio del job; ritorna true se era l'ultimo comando.
         bool markCommandDone(const std::string &jobId);
-
-        void recoverFromStall();
-
-        bool loadFromAllSourcesSafe();
     };
 } // namespace core

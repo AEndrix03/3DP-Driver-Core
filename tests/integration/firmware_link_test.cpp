@@ -982,6 +982,54 @@ namespace {
     const long E_PER_LINE = static_cast<long>(E_PER_MOVE * 80);
 }
 
+namespace {
+    /// Registra l'ordine in cui la coda esegue le righe, senza traffico verso il firmware.
+    struct OrderProbe : translator::gcode::ICommandDispatcher {
+        std::vector<int> *seen;
+
+        explicit OrderProbe(std::vector<int> *target) : seen(target) {}
+
+        bool canHandle(const std::string &command) const override { return command == "M9000"; }
+
+        bool validate(const std::string &, const std::map<std::string, double> &) const override { return true; }
+
+        void handle(const std::string &, const std::map<std::string, double> &params) override {
+            seen->push_back(static_cast<int>(params.at("S")));
+        }
+    };
+}
+
+static void testLargeJobOrder() {
+    prepareMachine();
+    // Una stampa vera ha centinaia di migliaia di righe: devono essere eseguite tutte,
+    // nell'ordine del file, senza tenere il file intero in memoria.
+    constexpr int LINES = 40000;
+    const std::string path = "gcode/large.gcode";
+    {
+        std::filesystem::create_directories("gcode");
+        std::ofstream out(path);
+        for (int i = 0; i < LINES; ++i) out << "M9000 S" << i << "\n";
+    }
+
+    std::vector<int> seen;
+    seen.reserve(LINES);
+    JobRig rig;
+    rig.translator->registerDispatcher(std::make_unique<OrderProbe>(&seen));
+
+    CHECK(rig.manager->startPrintJob(path, "job-large"));
+    CHECK(rig.waitState(core::print::JobState::COMPLETED, 120s));
+    CHECK_MSG(static_cast<int>(seen.size()) == LINES, "executed " + std::to_string(seen.size()));
+
+    int firstWrong = -1;
+    for (size_t i = 0; i < seen.size() && firstWrong < 0; ++i) {
+        if (seen[i] != static_cast<int>(i)) firstWrong = static_cast<int>(i);
+    }
+    CHECK_MSG(firstWrong < 0, "out of order at position " + std::to_string(firstWrong) + ": got line " +
+                              std::to_string(firstWrong >= 0 ? seen[firstWrong] : 0));
+    CHECK(rig.queue->getQueueSize() == 0);
+    std::filesystem::remove(path);
+}
+
 constexpr uint8_t ENABLE_PIN = 8; // LOW = motori alimentati
 
 static void testTravelLimits() {
@@ -1288,7 +1336,9 @@ static void testCancelJob() {
 }
 
 // ---------------------------------------------------------------------------
-int main() {
+int main(int argc, char **argv) {
+    // Argomento facoltativo: esegue solo gli scenari il cui nome lo contiene
+    const std::string filter = argc > 1 ? argv[1] : "";
     sim::start();
 
     port = std::make_shared<SimSerialPort>();
@@ -1325,6 +1375,7 @@ int main() {
             {"queue pause and stop on fault",      testQueueStopsOnFault},
             {"homing and endstops",                testHomingAndEndstops},
             {"full print job from file",           testFullPrintJob},
+            {"large job keeps file order",         testLargeJobOrder},
             {"software travel limits",             testTravelLimits},
             {"motor enable pin",                   testMotorEnable},
             {"pause, park and resume",             testPauseAndResume},
@@ -1335,6 +1386,7 @@ int main() {
     };
 
     for (const auto &[name, test]: tests) {
+        if (!filter.empty() && std::string(name).find(filter) == std::string::npos) continue;
         const int before = failures;
         std::printf("[ RUN  ] %s\n", name);
         std::fflush(stdout);
