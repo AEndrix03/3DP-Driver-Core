@@ -33,8 +33,40 @@
       "params": []
     },
     {
+      "code": 6,
+      "name": "Clear Error",
+      "params": []
+    },
+    {
+      "code": 7,
+      "name": "Error Status",
+      "params": []
+    },
+    {
+      "code": 8,
+      "name": "Power Status",
+      "params": []
+    },
+    {
+      "code": 9,
+      "name": "Force Power State",
+      "params": [
+        "P"
+      ]
+    },
+    {
       "code": 10,
       "name": "Print Status",
+      "params": []
+    },
+    {
+      "code": 11,
+      "name": "Diagnostics (uptime, reset cause, error counters, free RAM)",
+      "params": []
+    },
+    {
+      "code": 12,
+      "name": "End Print",
       "params": []
     }
   ]

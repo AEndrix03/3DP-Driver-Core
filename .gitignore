@@ -6,3 +6,6 @@ cmake-build-debug/
 .env
 external/
 vcpkg_installed/
+
+build-sim/
+temp/

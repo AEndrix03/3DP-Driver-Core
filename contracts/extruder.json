@@ -50,6 +50,11 @@
       "params": [
         "S"
       ]
+    },
+    {
+      "code": 16,
+      "name": "Get Position",
+      "params": []
     }
   ]
 }

@@ -3,16 +3,33 @@
   "description": "Temperature controller",
   "commands": [
     {
+      "code": 0,
+      "name": "Heater Off",
+      "params": []
+    },
+    {
       "code": 10,
       "name": "Set Temperature",
       "params": [
-        "T"
+        "S"
       ]
     },
     {
       "code": 20,
       "name": "Get Temperature",
       "params": []
+    },
+    {
+      "code": 25,
+      "name": "Thermal Protection Status",
+      "params": []
+    },
+    {
+      "code": 30,
+      "name": "Enable/Disable Runaway Protection",
+      "params": [
+        "S"
+      ]
     }
   ]
 }

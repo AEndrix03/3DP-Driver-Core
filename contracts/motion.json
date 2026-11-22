@@ -9,12 +9,33 @@
     },
     {
       "code": 10,
-      "name": "Move To",
+      "name": "Move Relative",
       "params": [
         "X",
         "Y",
         "Z",
+        "E",
         "F"
+      ]
+    },
+    {
+      "code": 11,
+      "name": "Move Absolute (omitted axes unchanged, E relative)",
+      "params": [
+        "X",
+        "Y",
+        "Z",
+        "E",
+        "F"
+      ]
+    },
+    {
+      "code": 12,
+      "name": "Set Current Position",
+      "params": [
+        "X",
+        "Y",
+        "Z"
       ]
     },
     {
@@ -24,6 +45,11 @@
         "X|Y|Z",
         "F"
       ]
+    },
+    {
+      "code": 114,
+      "name": "Get Position",
+      "params": []
     }
   ]
 }
