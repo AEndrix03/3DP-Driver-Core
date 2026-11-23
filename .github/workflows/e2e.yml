@@ -53,3 +53,20 @@ jobs:
             g++ -std=c++17 -fsyntax-only -Iinclude "$f" || status=1
           done
           exit $status
+
+  local-service:
+    # "3dp": servizio locale con API, riga di comando e storico SQLite. Deve compilare con
+    # il solo compilatore e SQLite, senza le dipendenze del driver completo.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install SQLite
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
+      - name: Build
+        run: bash tools/build_local.sh
+      - name: Smoke test
+        run: |
+          ./build-local/3dp help
+          # senza servizio attivo il client deve dirlo ed uscire con errore, non bloccarsi
+          if ./build-local/3dp status; then exit 1; fi
+

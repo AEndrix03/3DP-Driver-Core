@@ -67,6 +67,38 @@ della macchina all'inizio di quella riga: posizione, E, velocita', modalita', te
   rifiutata.
 - Viene ristampata al massimo la riga interrotta.
 
+## Versione locale: `3dp`
+
+Un solo programma al posto di backend, frontend e Kafka, per usare la stampante dal computer
+a cui e' collegata. Il resto dell'infrastruttura resta disponibile: questa e' un'alternativa.
+
+```
+tools/build_local.sh                       # servono solo g++ e SQLite (libsqlite3-dev / sqlite)
+build-local/3dp serve --port /dev/ttyUSB0  # su Windows: --port COM3
+```
+
+- **Servizio**: tiene la porta seriale, esegue le stampe, salva lo storico in
+  `3dp-data/history.sqlite` e i G-code in `3dp-data/gcode/`.
+- **Pagina di gestione**: `http://127.0.0.1:7333` (stato, temperatura, avanzamento, movimento
+  manuale, pausa, ripresa, annulla, arresto d'emergenza, caricamento di un G-code, storico).
+- **Riga di comando**: lo stesso eseguibile e' il client delle stesse API, e risponde in JSON.
+  E' il modo in cui uno script o un agente pilota la stampante.
+
+| Comando | Effetto |
+|---------|---------|
+| `3dp status` / `history` / `diag` | stato, storico, diagnostica del firmware (`S11`) |
+| `3dp home [XYZ]` | homing |
+| `3dp jog x=10 y=-5 z=1 e=2 f=3000` | movimento relativo in mm |
+| `3dp temp 200` / `3dp fan 50` | ugello (gradi), ventola (percento) |
+| `3dp gcode "G1 X10 F3000"` | una riga di G-code; durante una stampa passa davanti al job |
+| `3dp upload file.gcode` / `3dp print file.gcode` | salva nello spazio del servizio / avvia la stampa |
+| `3dp pause` / `resume` / `cancel` / `clear` | controllo della stampa, azzeramento errore |
+| `3dp estop` | arresto di emergenza: ferma i motori e spegne l'heater |
+
+Le API (`GET /api/status`, `GET /api/history`, `POST /api/<comando>?chiave=valore`) ascoltano
+solo su `127.0.0.1` e non hanno autenticazione: muovono una macchina, non vanno esposte in rete.
+La porta seriale e' in `src/local/NativeSerialPort.cpp` (Win32 e termios, nessuna libreria).
+
 ### Movimenti binari
 
 - I movimenti partono in formato binario, in step: la conversione da millimetri (con il resto

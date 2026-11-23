@@ -10,3 +10,5 @@ vcpkg_installed/
 build-sim/
 temp/
 checkpoints/
+build-local/
+3dp-data/
