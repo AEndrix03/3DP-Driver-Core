@@ -11,6 +11,17 @@ jobs:
     # Gira in entrambi i repository: una modifica al protocollo da un lato solo rompe la build.
     runs-on: ubuntu-latest
     steps:
+      # Un ramo di lavoro che tocca il protocollo esiste con lo stesso nome in entrambi i
+      # repository: si prova contro quello, altrimenti contro il ramo principale dell'altro.
+      - name: Pick the matching branch of the other repository
+        id: companion
+        run: |
+          branch="${{ github.head_ref || github.ref_name }}"
+          if git ls-remote --exit-code --heads "https://github.com/AEndrix03/3D-Printer-Firmware.git" "$branch" >/dev/null 2>&1; then
+            echo "ref=$branch" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=" >> "$GITHUB_OUTPUT"
+          fi
       - name: Checkout driver
         uses: actions/checkout@v4
         with:
@@ -20,6 +31,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: AEndrix03/3D-Printer-Firmware
+          ref: ${{ steps.companion.outputs.ref }}
           path: 3D-Printer-Firmware
       - name: Run end-to-end tests
         run: bash 3DP-Driver-Core/tests/integration/run.sh 3D-Printer-Firmware
