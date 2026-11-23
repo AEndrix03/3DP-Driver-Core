@@ -16,6 +16,9 @@ find_package(CURL CONFIG REQUIRED)
 
 # Executable
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS src/*.cpp)
+# src/local e' il servizio locale "3dp" (un altro eseguibile, con il proprio main):
+# si compila con tools/build_local.sh, senza le dipendenze di questo target.
+list(FILTER SOURCES EXCLUDE REGEX ".*/src/local/.*")
 add_executable(${PROJECT_NAME} ${SOURCES})
 
 target_include_directories(${PROJECT_NAME} PRIVATE include)

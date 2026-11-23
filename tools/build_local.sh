@@ -36,6 +36,11 @@ sources=(
     src/translator/dispatchers/motion/MotionDispatcher.cpp
     src/translator/dispatchers/system/SystemDispatcher.cpp
     src/translator/dispatchers/temperature/TemperatureDispatcher.cpp
+    src/translator/dispatchers/compat/CompatibilityDispatcher.cpp
+    src/translator/GCodeSupport.cpp
+    src/translator/dispatchers/extruder/ExtruderDispatcher.cpp
+    src/translator/dispatchers/endstop/EndstopDispatcher.cpp
+    src/local/Slicer.cpp
     src/logger/Logger.cpp
     src/local/NativeSerialPort.cpp
     src/local/History.cpp

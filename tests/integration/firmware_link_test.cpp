@@ -21,6 +21,8 @@
 #include "translator/dispatchers/motion/MotionDispatcher.hpp"
 #include "translator/dispatchers/system/SystemDispatcher.hpp"
 #include "translator/dispatchers/temperature/TemperatureDispatcher.hpp"
+#include "translator/dispatchers/compat/CompatibilityDispatcher.hpp"
+#include "translator/GCodeSupport.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -1041,6 +1043,7 @@ namespace {
             translator->registerDispatcher(std::make_unique<translator::gcode::SystemDispatcher>(driver));
             translator->registerDispatcher(std::make_unique<translator::gcode::TemperatureDispatcher>(driver));
             translator->registerDispatcher(std::make_unique<translator::gcode::FanDispatcher>(driver));
+            translator->registerDispatcher(std::make_unique<translator::gcode::CompatibilityDispatcher>(driver));
             queue = std::make_shared<core::CommandExecutorQueue>(translator);
             manager = std::make_shared<core::print::PrintJobManager>(driver, queue);
         }
@@ -1396,6 +1399,53 @@ static void testFullPrintJob() {
     CHECK(sim::steps().x == referenceSteps.x && sim::steps().e == 2 * referenceSteps.e);
 }
 
+static void testSlicedFile() {
+    // File prodotto da PrusaSlicer 2.9 con il profilo config/slicer/3dp-prusaslicer.ini:
+    // un anello di 5 strati, con archi veri (G2/G3), riscaldamento, ventola e ritrazioni.
+    const char *fixtures = std::getenv("THREEDP_FIXTURES");
+    const std::string path = std::string(fixtures ? fixtures : "tests/fixtures") + "/prusaslicer_ring.gcode";
+
+    // --- controllo preventivo: tutto cio' che lo slicer scrive e' gestito ---
+    const auto report = translator::gcode::checkFile(path, 220.0, 220.0, 200.0);
+    CHECK_MSG(report.printable(), report.problems.empty() ? "unreadable" : report.problems.front());
+    CHECK(report.unknown.empty() && report.fatal.empty());
+    CHECK(report.arcs > 100 && report.layers == 5 && report.homes);
+    CHECK(report.maxHotend == 210.0);
+
+    // --- stampa completa sulla macchina simulata, hotend compreso ---
+    prepareMachine();
+    sim::enableThermalModel(true, 25.0);
+    sim::enableThermistor(true);
+    sim::setTimeScale(12.0);
+    {
+        JobRig rig;
+        const uint64_t faults = driver->faultEpoch();
+        const long eStart = sim::steps().e;
+        CHECK(rig.manager->startPrintJob(path, "job-sliced"));
+        CHECK_MSG(rig.waitState(core::print::JobState::COMPLETED, 300s),
+                  "job state after timeout, fault: " + driver->lastFaultReason());
+        CHECK(idle());
+        CHECK(driver->faultEpoch() == faults);
+        CHECK(!driver->isLinkFaulted());
+
+        // G-code di fine stampa: pezzo presentato a X5 Y200, ugello 5 mm sopra l'ultimo strato (1 mm)
+        const auto end = sim::steps();
+        CHECK_MSG(end.x == -800 + 5 * 80 && end.y == -800 + 200 * 80,
+                  "x=" + std::to_string(end.x) + " y=" + std::to_string(end.y));
+        CHECK_MSG(end.z == -400 + 6 * 400, "z=" + std::to_string(end.z));
+        CHECK(end.e - eStart > 100 * 80); // oltre 100 mm di filamento estrusi
+
+        // heater spento dal G-code di fine stampa
+        std::this_thread::sleep_for(300ms);
+        CHECK(!sim::pinLevel(15 /* A1: heater */));
+    }
+    sim::setTimeScale(1.0);
+    sim::enableThermistor(false);
+    sim::enableThermalModel(false);
+    std::error_code ec;
+    std::filesystem::remove_all(core::print::JobCheckpoint::directory(), ec);
+}
+
 static void testPauseAndResume() {
     prepareMachine();
     const std::string path = writePrintFile();
@@ -1604,6 +1654,7 @@ int main(int argc, char **argv) {
             {"binary stream fault recovery",       testStreamFaults},
             {"motor enable pin",                   testMotorEnable},
             {"stack guard",                        testStackGuard},
+            {"sliced file from PrusaSlicer",       testSlicedFile},
             {"pause, park and resume",             testPauseAndResume},
             {"recover after link fault",           testRecoverAfterLinkFault},
             {"recover after firmware reboot",      testRecoverAfterFirmwareReboot},

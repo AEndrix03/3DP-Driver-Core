@@ -51,6 +51,7 @@ th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); 
       <span>Posizione</span><span id="pos">-</span>
       <span>Coda</span><span id="queue">-</span>
       <span>Guasto</span><span id="fault">-</span>
+      <span>Ultima stampa</span><span id="last">-</span>
     </div>
     <div class="bar" style="margin:10px 0"><div id="progress"></div></div>
     <div class="row">
@@ -92,7 +93,14 @@ th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); 
 
   <div class="card">
     <h2>Stampa</h2>
-    <div class="row"><input id="file" type="file" accept=".gcode,.gco,.g"><button class="primary" onclick="uploadAndPrint()">Carica e stampa</button></div>
+    <div class="row"><input id="file" type="file" accept=".gcode,.gco,.g,.stl,.3mf,.obj"><button class="primary" onclick="uploadAndPrint()">Carica e stampa</button></div>
+    <div class="row">
+      <label>Strato <input id="layer" type="number" step="0.05" value="0.2"></label>
+      <label>Riempimento <input id="infill" type="number" value="20"> %</label>
+      <label>Ugello <input id="stemp" type="number" value="205"> &deg;C</label>
+      <label><input id="supports" type="checkbox"> supporti</label>
+    </div>
+    <div id="report" style="color:var(--muted);font-size:14px;margin-bottom:8px">Un modello (.stl) viene prima affettato con il profilo della macchina; un G-code viene controllato e stampato.</div>
     <div class="row"><input id="path" placeholder="oppure percorso di un file sul computer" style="flex:1"><button onclick="api('print','file='+encodeURIComponent(val('path')))">Stampa</button></div>
     <div class="row"><input id="gcode" placeholder="comando G-code, es. M114" style="flex:1"><button onclick="sendGcode()">Invia</button></div>
     <div id="log"></div>
@@ -121,11 +129,37 @@ function jog(axis, sign) {
   api('jog', axis + '=' + amount + '&f=' + (axis === 'z' ? 300 : axis === 'e' ? 300 : val('feed')));
 }
 function sendGcode() { api('gcode', 'line=' + encodeURIComponent(val('gcode'))); }
+function describe(report) {
+  if (!report) return '';
+  const b = report.bounds;
+  let text = report.moves + ' movimenti (' + report.arcs + ' archi), ' + report.layers + ' strati, filamento ' + (report.filamentMm / 1000).toFixed(2) + ' m, ingombro '
+    + (b.maxX - b.minX).toFixed(0) + ' x ' + (b.maxY - b.minY).toFixed(0) + ' x ' + b.maxZ.toFixed(1) + ' mm.';
+  if (report.problems.length) text += ' NON STAMPABILE: ' + report.problems.join('; ') + '.';
+  if (report.warnings.length) text += ' Avvisi: ' + report.warnings.join('; ') + '.';
+  return text;
+}
 async function uploadAndPrint() {
   const file = $('file').files[0];
   if (!file) { log('nessun file scelto'); return; }
-  const uploaded = await api('upload', 'name=' + encodeURIComponent(file.name), {body: await file.text()});
-  if (uploaded && uploaded.ok) api('print', 'file=' + encodeURIComponent(uploaded.path) + '&name=' + encodeURIComponent(file.name));
+  const isModel = /\.(stl|3mf|obj)$/i.test(file.name);
+  const uploaded = await api('upload', 'name=' + encodeURIComponent(file.name), {body: await file.arrayBuffer()});
+  if (!uploaded || !uploaded.ok) return;
+  let path = uploaded.path, extra = '';
+  if (isModel) {
+    $('report').textContent = 'Slicing in corso...';
+    const sliced = await api('slice', 'file=' + encodeURIComponent(path) + '&layer=' + val('layer') + '&infill=' + val('infill')
+      + '&temp=' + val('stemp') + '&supports=' + ($('supports').checked ? 1 : 0));
+    $('report').textContent = sliced ? (sliced.report ? describe(sliced.report) : (sliced.message || '')) : '';
+    if (!sliced || !sliced.ok) return;
+    extra = '&source=' + encodeURIComponent(sliced.source) + '&slicer=' + encodeURIComponent(sliced.slicer);
+    path = sliced.path;
+  } else {
+    const checked = await api('check', 'file=' + encodeURIComponent(path));
+    $('report').textContent = checked && checked.report ? describe(checked.report) : '';
+    if (!checked || !checked.ok) return;
+  }
+  if (!confirm('Avviare la stampa di ' + file.name + '?')) return;
+  api('print', 'file=' + encodeURIComponent(path) + '&name=' + encodeURIComponent(file.name) + extra);
 }
 const esc = t => String(t == null ? '' : t).replace(/[&<>"']/g, c => '&#' + c.charCodeAt(0) + ';');
 function span(a, b) { if (!a) return '-'; const s = (b || Date.now() / 1000) - a; return s < 90 ? Math.round(s) + ' s' : Math.round(s / 60) + ' min'; }
@@ -143,6 +177,7 @@ async function refresh() {
     $('queue').textContent = s.queue;
     $('fault').textContent = s.fault || '-';
     $('fault').className = s.fault ? 'warn' : '';
+    $('last').textContent = s.lastResult || '-';
     const rows = (await (await fetch('/api/history')).json()).prints || [];
     $('history').innerHTML = rows.map(r => '<tr><td>' + new Date(r.startedAt * 1000).toLocaleString() + '</td><td>' + esc(r.name) + '</td><td>' + esc(r.state) + '</td>'<td>' + r.lines + '</td><td>' + span(r.startedAt, r.finishedAt) + '</td><td>' + esc(r.error) + '</td></tr>').join('');
   } catch (e) { $('conn').textContent = 'servizio fermo'; $('conn').className = 'badge bad'; }

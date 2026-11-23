@@ -19,6 +19,7 @@
 #include "../../third_party/httplib.h"
 
 #include "WebUi.hpp"
+#include "Slicer.hpp"
 #include "core/DriverInterface.hpp"
 #include "core/printer/job/GCodeDownloader.hpp"
 #include "core/printer/job/PrintJobManager.hpp"
@@ -33,6 +34,10 @@
 #include "translator/dispatchers/motion/MotionDispatcher.hpp"
 #include "translator/dispatchers/system/SystemDispatcher.hpp"
 #include "translator/dispatchers/temperature/TemperatureDispatcher.hpp"
+#include "translator/dispatchers/extruder/ExtruderDispatcher.hpp"
+#include "translator/dispatchers/endstop/EndstopDispatcher.hpp"
+#include "translator/dispatchers/compat/CompatibilityDispatcher.hpp"
+#include "translator/GCodeSupport.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -167,6 +172,10 @@ namespace {
             translator_->registerDispatcher(std::make_unique<translator::gcode::SystemDispatcher>(driver_));
             translator_->registerDispatcher(std::make_unique<translator::gcode::TemperatureDispatcher>(driver_));
             translator_->registerDispatcher(std::make_unique<translator::gcode::FanDispatcher>(driver_));
+            translator_->registerDispatcher(std::make_unique<translator::gcode::ExtruderDispatcher>(driver_));
+            translator_->registerDispatcher(std::make_unique<translator::gcode::EndstopDispatcher>(driver_));
+            // per ultimo: comandi di contorno degli slicer (G4, M400, G21, M73, ...)
+            translator_->registerDispatcher(std::make_unique<translator::gcode::CompatibilityDispatcher>(driver_));
             queue_ = std::make_shared<core::CommandExecutorQueue>(translator_);
             manager_ = std::make_shared<core::print::PrintJobManager>(driver_, queue_);
 
@@ -195,6 +204,7 @@ namespace {
             out << "{\"connected\":" << (port_->isOpen() && !driver_->isLinkFaulted() ? "true" : "false")
                 << ",\"state\":" << quote(core::DriverInterface::printStateToString(driver_->getState()))
                 << ",\"fault\":" << quote(faultText_)
+                << ",\"lastResult\":" << quote(lastResult_)
                 << ",\"queue\":" << queue_->getQueueSize()
                 << ",\"job\":{\"id\":" << quote(activeJob_) << ",\"name\":" << quote(activeName_)
                 << ",\"state\":" << quote(activeJob_.empty() ? "" : jobStateName(state))
@@ -257,6 +267,15 @@ namespace {
                                            : driver_->fan()->setFanSpeed(static_cast<int>(*percent)));
             }
             if (name == "upload") return upload(params, body);
+            if (name == "check") {
+                const auto it = params.find("file");
+                if (it == params.end()) return reply(false, "missing file=<path>");
+                const auto report = translator::gcode::checkFile(it->second, local::VOLUME_X, local::VOLUME_Y,
+                                                                 local::VOLUME_Z);
+                return reply(report.printable(), report.printable() ? "printable" : "not printable",
+                             "\"report\":" + local::reportJson(report));
+            }
+            if (name == "slice") return sliceModel(params);
             if (name == "print") return print(params);
             if (name == "gcode") {
                 const auto it = params.find("line");
@@ -314,7 +333,7 @@ namespace {
         std::thread poller_;
         std::atomic<bool> running_{false};
 
-        std::string activeJob_, activeName_, faultText_;
+        std::string activeJob_, activeName_, faultText_, lastResult_;
         bool tempKnown_ = false, posKnown_ = false, posReferenced_ = false;
         double tempCurrent_ = 0, tempTarget_ = 0, posX_ = 0, posY_ = 0, posZ_ = 0;
 
@@ -341,10 +360,35 @@ namespace {
             return reply(true, "saved", "\"path\":" + quote(path.generic_string()));
         }
 
+        std::string sliceModel(const Params &params) {
+            const auto it = params.find("file");
+            if (it == params.end()) return reply(false, "missing file=<model.stl>");
+            Params options = params;
+            options.erase("file");
+            const auto output = std::filesystem::path(dataDir_) / "gcode" /
+                                (std::filesystem::path(it->second).stem().string() + "_" +
+                                 std::to_string(std::time(nullptr)) + ".gcode");
+            const auto sliced = local::slice(it->second, output.generic_string(), options);
+            if (!sliced.ok) return reply(false, sliced.message, "\"log\":" + quote(sliced.log));
+            const auto report = translator::gcode::checkFile(sliced.gcodePath, local::VOLUME_X, local::VOLUME_Y,
+                                                             local::VOLUME_Z);
+            return reply(report.printable(), report.printable() ? "sliced" : "sliced, but not printable",
+                         "\"path\":" + quote(sliced.gcodePath) + ",\"source\":" + quote(it->second) +
+                         ",\"slicer\":" + quote(sliced.parameters) + ",\"report\":" + local::reportJson(report));
+        }
+
         std::string print(const Params &params) {
             const auto it = params.find("file");
             if (it == params.end() || !std::filesystem::exists(it->second)) return reply(false, "file not found");
             if (isActive(manager_->getCurrentState())) return reply(false, "a print is already active");
+
+            // Un file che uscirebbe dal volume o usa comandi incompatibili non parte (force=1 per insistere)
+            const auto report = translator::gcode::checkFile(it->second, local::VOLUME_X, local::VOLUME_Y,
+                                                             local::VOLUME_Z);
+            if (!report.printable() && params.find("force") == params.end()) {
+                return reply(false, "the file did not pass the check (add force=1 to print anyway)",
+                             "\"report\":" + local::reportJson(report));
+            }
             toIdle();
 
             local::PrintRecord record;
@@ -389,8 +433,14 @@ namespace {
                 if (!job.empty() && !printing &&
                     (state == JobState::COMPLETED || state == JobState::FAILED || state == JobState::CANCELLED)) {
                     const auto info = core::jobs::JobTracker::getInstance().getJobInfo(job);
-                    history_.finish(job, jobStateName(state), info ? info->error : "");
+                    // Il motivo vero e' quello del guasto che ha fermato il job, non il generico "Job failed"
+                    std::string error = info ? info->error : "";
+                    if (state == JobState::FAILED && (error.empty() || error == "Job failed")) {
+                        error = driver_->lastFaultReason();
+                    }
+                    history_.finish(job, jobStateName(state), error);
                     std::lock_guard<std::mutex> lock(cacheMutex_);
+                    lastResult_ = activeName_ + ": " + jobStateName(state) + (error.empty() ? "" : " - " + error);
                     activeJob_.clear();
                     activeName_.clear();
                 }
@@ -499,7 +549,9 @@ namespace {
         for (const auto &argument: arguments) {
             const size_t eq = argument.find('=');
             if (eq != std::string::npos) params.emplace(argument.substr(0, eq), argument.substr(eq + 1));
-            else if (name == "print" || name == "upload") params.emplace("file", argument);
+            else if (name == "print" || name == "upload" || name == "check" || name == "slice") {
+                params.emplace("file", argument);
+            }
             else if (name == "gcode") params.emplace("line", argument);
             else if (name == "home") params.emplace("axes", argument);
             else if (name == "temp" || name == "fan") params.emplace("s", argument);
@@ -543,7 +595,10 @@ namespace {
                   "  3dp home [XYZ]            3dp jog x=10 y=-5 z=1 e=2 f=3000\n"
                   "  3dp temp <degrees>        3dp fan <percent>\n"
                   "  3dp gcode \"G1 X10 F3000\"\n"
-                  "  3dp upload <file.gcode>   3dp print <file.gcode> [name=...]\n"
+                  "  3dp upload <file.gcode>   3dp print <file.gcode> [name=...] [force=1]\n"
+                  "  3dp check <file.gcode>    what the driver would do with the file (no printer needed)\n"
+                  "  3dp slice <model.stl> [out=...] [layer=0.2 infill=20 temp=205 perimeters=2 speed=45\n"
+                  "                                   supports=0 brim=0]   (PrusaSlicer, no printer needed)\n"
                   "  3dp pause | resume | cancel | clear | estop\n\n"
                   "Client commands accept --http <port> and print the JSON answer of the service.\n";
     }
@@ -566,6 +621,44 @@ int main(int argc, char **argv) {
     if (rest.empty() || rest[0] == "help" || rest[0] == "--help") {
         usage();
         return rest.empty() ? 2 : 0;
+    }
+    const std::vector<std::string> commandArguments(rest.begin() + 1, rest.end());
+    if (rest[0] == "check") {
+        // Non serve la stampante: legge il file e dice cosa ne farebbe il driver
+        if (commandArguments.empty()) {
+            std::cerr << "usage: 3dp check <file.gcode>" << std::endl;
+            return 2;
+        }
+        const auto report = translator::gcode::checkFile(commandArguments[0], local::VOLUME_X, local::VOLUME_Y,
+                                                         local::VOLUME_Z);
+        std::cout << local::reportJson(report) << std::endl;
+        return report.printable() ? 0 : 1;
+    }
+    if (rest[0] == "slice") {
+        if (commandArguments.empty()) {
+            std::cerr << "usage: 3dp slice <model.stl> [out=file.gcode] [layer=0.2 infill=20 temp=205 "
+                         "perimeters=2 speed=45 supports=0 brim=0]" << std::endl;
+            return 2;
+        }
+        std::map<std::string, std::string> options;
+        std::string output = std::filesystem::path(commandArguments[0]).replace_extension(".gcode").string();
+        for (size_t i = 1; i < commandArguments.size(); ++i) {
+            const size_t eq = commandArguments[i].find('=');
+            if (eq == std::string::npos) continue;
+            const std::string key = commandArguments[i].substr(0, eq), value = commandArguments[i].substr(eq + 1);
+            if (key == "out") output = value;
+            else options[key] = value;
+        }
+        const auto sliced = local::slice(commandArguments[0], output, options);
+        if (!sliced.ok) {
+            std::cerr << "3dp slice: " << sliced.message << "\n" << sliced.log << std::endl;
+            return 1;
+        }
+        const auto report = translator::gcode::checkFile(output, local::VOLUME_X, local::VOLUME_Y, local::VOLUME_Z);
+        std::cout << "{\"ok\":" << (report.printable() ? "true" : "false") << ",\"path\":"
+                  << quote(std::filesystem::path(output).generic_string())
+                  << ",\"report\":" << local::reportJson(report) << "}" << std::endl;
+        return report.printable() ? 0 : 1;
     }
     if (rest[0] == "serve") {
         if (device.empty()) {

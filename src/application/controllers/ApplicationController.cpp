@@ -13,6 +13,7 @@
 #include "translator/dispatchers/endstop/EndstopDispatcher.hpp"
 #include "translator/dispatchers/temperature/TemperatureDispatcher.hpp"
 #include "translator/dispatchers/history/HistoryDispatcher.hpp"
+#include "translator/dispatchers/compat/CompatibilityDispatcher.hpp"
 #include "application/monitor/SystemMonitor.hpp"
 #include "core/serial/impl/RealSerialPort.hpp"
 
@@ -335,6 +336,10 @@ void ApplicationController::initializeDispatchers() {
 
     translator_->registerDispatcher(std::make_unique<translator::gcode::HistoryDispatcher>(driver_));
     Logger::logInfo("[ApplicationController]   ✓ HistoryDispatcher");
+
+    // Per ultimo: i comandi che hanno un dispatcher proprio passano prima da quello
+    translator_->registerDispatcher(std::make_unique<translator::gcode::CompatibilityDispatcher>(driver_));
+    Logger::logInfo("[ApplicationController]   ✓ CompatibilityDispatcher (G4, M400, slicer housekeeping)");
 
     Logger::logInfo("[ApplicationController] All GCode dispatchers registered successfully");
 }

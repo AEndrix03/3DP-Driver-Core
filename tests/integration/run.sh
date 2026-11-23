@@ -71,6 +71,8 @@ driver_sources=(
     src/translator/dispatchers/motion/MotionDispatcher.cpp
     src/translator/dispatchers/system/SystemDispatcher.cpp
     src/translator/dispatchers/temperature/TemperatureDispatcher.cpp
+    src/translator/dispatchers/compat/CompatibilityDispatcher.cpp
+    src/translator/GCodeSupport.cpp
     tests/integration/firmware_link_test.cpp
 )
 for rel in "${driver_sources[@]}"; do
@@ -88,5 +90,7 @@ esac
 "$CXX" "${objects[@]}" -o "$BUILD_DIR/firmware_link_test" "${link_flags[@]}"
 
 # La coda comandi crea temp/command_queue.dat nella directory corrente
+# File G-code di prova (prodotti da uno slicer vero) usati da alcuni scenari
+export THREEDP_FIXTURES="$DRIVER_DIR/tests/fixtures"
 cd "$BUILD_DIR/work"
 "$BUILD_DIR/firmware_link_test" ${ONLY:+"$ONLY"}

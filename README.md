@@ -92,8 +92,29 @@ build-local/3dp serve --port /dev/ttyUSB0  # su Windows: --port COM3
 | `3dp temp 200` / `3dp fan 50` | ugello (gradi), ventola (percento) |
 | `3dp gcode "G1 X10 F3000"` | una riga di G-code; durante una stampa passa davanti al job |
 | `3dp upload file.gcode` / `3dp print file.gcode` | salva nello spazio del servizio / avvia la stampa |
+| `3dp check file.gcode` | cosa farebbe il driver con il file, senza stampante: comandi saltati o incompatibili, ingombro, strati, filamento |
+| `3dp slice modello.stl [layer=0.2 infill=20 temp=205 perimeters=2 speed=45 supports=0 brim=0]` | affetta il modello con PrusaSlicer e controlla il risultato, senza stampante |
 | `3dp pause` / `resume` / `cancel` / `clear` | controllo della stampa, azzeramento errore |
 | `3dp estop` | arresto di emergenza: ferma i motori e spegne l'heater |
+
+### Slicer
+
+Lo slicing usa **PrusaSlicer** da riga di comando con il profilo della macchina,
+`config/slicer/3dp-prusaslicer.ini` (ugello 0,4 mm, filamento 1,75 mm, volume 220 x 220 x 200,
+nessun piano riscaldato, archi veri `G2`/`G3`, G-code di avvio con homing e linea di spurgo).
+
+- Installazione: `sudo apt install prusa-slicer` (Ubuntu) oppure `sudo pacman -S prusa-slicer`
+  (Arch). Se l'eseguibile non e' nel PATH: variabile `THREEDP_SLICER`. Profilo diverso:
+  `THREEDP_SLICER_PROFILE`.
+- Dalla pagina basta scegliere un `.stl`: viene affettato, controllato e, dopo conferma, stampato.
+  Nello storico restano il modello di partenza e i parametri usati.
+- Una stampa non parte se il file non supera il controllo (esce dal volume, usa un secondo
+  estrusore, pollici, ...); `force=1` per insistere.
+- Cosa fa il driver con ogni comando G-code e' in `src/translator/GCodeSupport.cpp`: un solo
+  elenco, usato sia dall'esecuzione sia dal controllo. Lo scenario e2e "sliced file from
+  PrusaSlicer" stampa in simulazione un file prodotto davvero con questo profilo
+  (`tests/fixtures/prusaslicer_ring.gcode`).
+- I valori del profilo segnati "VERIFICARE" (ritrazione, velocita') dipendono dalla meccanica.
 
 Le API (`GET /api/status`, `GET /api/history`, `POST /api/<comando>?chiave=valore`) ascoltano
 solo su `127.0.0.1` e non hanno autenticazione: muovono una macchina, non vanno esposte in rete.
