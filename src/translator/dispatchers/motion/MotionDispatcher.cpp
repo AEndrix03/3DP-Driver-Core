@@ -209,8 +209,9 @@ namespace translator::gcode {
         ensurePrinting();
         target.feedrate = feedrateToSend();
 
-        const auto result = absoluteXYZ_ ? driver_->motion()->moveAbsolute(target)
-                                         : driver_->motion()->moveRelative(target);
+        // Flusso di stampa: non si attende la risposta di ogni segmento
+        const auto result = absoluteXYZ_ ? driver_->motion()->moveAbsolute(target, true)
+                                         : driver_->motion()->moveRelative(target, true);
         if (!result.isSuccess()) {
             position_.reset();
             lastSentFeedrate_ = -1.0;
@@ -269,7 +270,7 @@ namespace translator::gcode {
             }
             target.feedrate = feedrateToSend();
 
-            const auto result = driver_->motion()->moveAbsolute(target);
+            const auto result = driver_->motion()->moveAbsolute(target, true);
             if (!result.isSuccess() || driver_->faultEpoch() != epoch) {
                 position_.reset();
                 lastSentFeedrate_ = -1.0;

@@ -28,6 +28,8 @@ namespace core {
 
         void send(const std::string &data) override;
 
+        void sendRaw(const std::string &bytes) override;
+
         std::string receiveLine() override;
 
         bool isOpen() const override;

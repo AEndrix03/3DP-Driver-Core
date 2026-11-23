@@ -74,6 +74,9 @@ namespace core {
          */
         void sendCommand(const std::string &command);
 
+        /// Invia un frame binario (nessun fine riga).
+        void sendRaw(const std::string &bytes);
+
         /**
          * @brief Controlla se la porta seriale è aperta
          */

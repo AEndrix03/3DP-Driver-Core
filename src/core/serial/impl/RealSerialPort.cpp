@@ -1,5 +1,6 @@
 #include "core/serial/impl/RealSerialPort.hpp"
 #include "logger/Logger.hpp"
+#include "core/MoveFrame.hpp"
 #include <boost/system/error_code.hpp>
 #include <iostream>
 #include <thread>
@@ -200,6 +201,22 @@ namespace core {
         }
 
         if (Logger::isTraceEnabled()) Logger::logTrace("[TX] " + data);
+    }
+
+    void RealSerialPort::sendRaw(const std::string &bytes) {
+        if (!serial_port_ || !serial_port_->is_open()) {
+            Logger::logError("[SerialPort] ERROR: Serial port not open when trying to send!");
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(writeMutex_);
+        boost::system::error_code ec;
+        boost::asio::write(*serial_port_, boost::asio::buffer(bytes), ec);
+        if (ec) {
+            Logger::logError("[SerialPort] Write error: " + ec.message());
+            return;
+        }
+        if (Logger::isTraceEnabled()) Logger::logTrace("[TX] " + MoveFrame::describe(bytes));
     }
 
     bool RealSerialPort::extractLine(std::string &line) {

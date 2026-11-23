@@ -4,6 +4,7 @@
 
 #include "core/DriverInterface.hpp"
 #include "core/CommandBuilder.hpp"
+#include "core/MoveFrame.hpp"
 #include "logger/Logger.hpp"
 #include <chrono>
 #include <mutex>
@@ -95,6 +96,7 @@ namespace core {
             lastFaultReason_ = reason;
         }
         faultEpoch_.fetch_add(1);
+        positionEpoch_.fetch_add(1);
         Logger::logError("[DriverInterface] FAULT: " + reason);
     }
 
@@ -102,6 +104,8 @@ namespace core {
         // Volutamente fuori da commandMutex_: deve arrivare mentre un comando sta eseguendo.
         if (serialPort_ && serialPort_->isOpen()) {
             Logger::logWarning("[DriverInterface] Sending motion abort");
+            abortSent_ = true; // i movimenti ancora in volo verranno scartati dal firmware: e' previsto
+            positionEpoch_.fetch_add(1);
             serialPort_->send("!");
         }
     }
@@ -161,6 +165,7 @@ namespace core {
         lastIssued_ = 0;
         lastCompleted_ = 0;
         sequenceEpoch_.fetch_add(1);
+        positionEpoch_.fetch_add(1);
 
         auto *self = const_cast<DriverInterface *>(this);
         for (const auto &line: result.body) {
@@ -178,10 +183,98 @@ namespace core {
         return true;
     }
 
+    void DriverInterface::handleMoveFailure(const types::Result &result, bool reportFault) const {
+        positionEpoch_.fetch_add(1);
+        auto *self = const_cast<DriverInterface *>(this);
+
+        switch (result.code) {
+            case types::ResultCode::Rejected:
+                // Sequenza integra, movimento non eseguito. Dopo un arresto chiesto da noi
+                // i movimenti scartati sono attesi, non un guasto.
+                if (reportFault && !abortSent_.load()) raiseFault(result.message);
+                break;
+            case types::ResultCode::Busy:
+                self->setState(PrintState::Error);
+                raiseFault(result.message);
+                break;
+            default:
+                linkFault_ = true;
+                self->setState(PrintState::Error);
+                raiseFault(result.code == types::ResultCode::Resend
+                           ? "Firmware lost command sequence (" + result.message + ")" : result.message);
+                break;
+        }
+    }
+
+    void DriverInterface::drainMovesLocked() const {
+        if (!commandExecutor_->hasPendingMoves()) {
+            abortSent_ = false;
+            return;
+        }
+        const types::Result drained = commandExecutor_->drainMoves();
+        if (const auto completed = commandExecutor_->lastWindowCompleted()) lastCompleted_ = *completed;
+        // Nessun chiamante riceve questo esito: se e' un errore va segnalato come guasto
+        if (!drained.isSuccess()) handleMoveFailure(drained, true);
+        abortSent_ = false;
+    }
+
+    void DriverInterface::flushMoves() const {
+        std::lock_guard<std::mutex> lock(commandMutex_);
+        drainMovesLocked();
+    }
+
+    types::Result DriverInterface::sendMove(const int32_t delta[4], uint32_t feedrate, bool pipelined) const {
+        std::lock_guard<std::mutex> lock(commandMutex_);
+
+        try {
+            if (linkFault_) {
+                drainMovesLocked();
+                if (!resyncLocked()) {
+                    return {types::ResultCode::Error, "Link fault: " + lastFaultReason(), std::nullopt, {}};
+                }
+            }
+
+            const uint32_t cmdNum = commandContext_->nextCommandNumber();
+            const std::string frame = MoveFrame::encode(cmdNum, delta, feedrate);
+            types::Result result = commandExecutor_->submitMove(frame, cmdNum, !pipelined);
+            if (const auto completed = commandExecutor_->lastWindowCompleted()) lastCompleted_ = *completed;
+
+            if (result.isSuccess()) {
+                lastIssued_ = cmdNum;
+                return result;
+            }
+
+            // In modalita' pipelined l'errore puo' riguardare un movimento precedente: questo
+            // frame allora non e' partito e il suo numero non e' stato consumato dal firmware.
+            if (result.commandNumber != std::optional<uint32_t>(cmdNum) && pipelined) {
+                commandContext_->setCommandNumber(cmdNum);
+            }
+            handleMoveFailure(result, false);
+
+            if (result.isRejected() || result.isBusy()) {
+                // Un comando di testo dice al firmware che ci siamo riallineati: i movimenti
+                // binari tornano ad essere accettati.
+                sendTextLocked('S', 10, {});
+            }
+            if (result.code == types::ResultCode::Resend) result.code = types::ResultCode::SyncLost;
+            return result;
+
+        } catch (const std::exception &e) {
+            Logger::logError("[DriverInterface] Exception in sendMove: " + std::string(e.what()));
+            return {types::ResultCode::Error, std::string("Exception: ") + e.what(), std::nullopt, {}};
+        }
+    }
+
     types::Result
     DriverInterface::sendCommandInternal(char category, int code, const std::vector<std::string> &params) const {
         std::lock_guard<std::mutex> lock(commandMutex_);
+        // I comandi di testo sono uno alla volta: prima si chiudono i movimenti in volo
+        drainMovesLocked();
+        return sendTextLocked(category, code, params);
+    }
 
+    types::Result
+    DriverInterface::sendTextLocked(char category, int code, const std::vector<std::string> &params) const {
         try {
             if (linkFault_ && !resyncLocked()) {
                 return {types::ResultCode::Error, "Link fault: " + lastFaultReason(), std::nullopt, {}};
@@ -209,6 +302,10 @@ namespace core {
                     }
                     lastIssued_ = cmdNum;
                     if (result.completedNumber) lastCompleted_ = *result.completedNumber;
+                    // Comandi che cambiano la posizione senza passare dai movimenti binari
+                    if ((category == 'M' && code != 114 && code != 115) || (category == 'S' && code == 0)) {
+                        positionEpoch_.fetch_add(1);
+                    }
                     break;
                 case types::ResultCode::Duplicate:
                     // Eseguito (o accodato), ma la risposta e gli eventuali dati sono andati persi

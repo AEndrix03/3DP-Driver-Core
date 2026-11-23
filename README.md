@@ -67,6 +67,20 @@ della macchina all'inizio di quella riga: posizione, E, velocita', modalita', te
   rifiutata.
 - Viene ristampata al massimo la riga interrotta.
 
+### Movimenti binari
+
+- I movimenti partono in formato binario, in step: la conversione da millimetri (con il resto
+  frazionario dell'estrusore) avviene qui. Formato in `include/core/MoveFrame.hpp` e in
+  `PROTOCOL.md` del firmware.
+- Durante una stampa fino a 4 movimenti restano in volo senza attendere la risposta
+  (`CommandExecutor::submitMove`). Un comando di testo attende sempre che siano stati tutti
+  confermati.
+- Dopo un frame corrotto, perso o una risposta persa, i movimenti vengono rispediti dal primo
+  che il firmware non ha accettato.
+- `MotionCommands` tiene una copia della posizione del firmware in step, riletta con `M115`
+  ogni volta che `DriverInterface::positionEpoch()` cambia.
+- Con `DRIVER_SERIAL_TRACE=1` i frame compaiono decodificati nella traccia (`MOVE #12 X16 Y-4 E1`).
+
 ### Coda dei comandi e log
 
 - Un job viene letto dal file G-code **riga per riga mentre viene eseguito**: in memoria c'e' solo la

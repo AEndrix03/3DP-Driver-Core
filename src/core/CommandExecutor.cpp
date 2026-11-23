@@ -195,6 +195,247 @@ namespace core {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Finestra dei movimenti binari
+    // ------------------------------------------------------------------
+
+    CommandExecutor::Reply CommandExecutor::nextReply(std::chrono::milliseconds silence) {
+        Reply reply;
+        auto lastActivity = std::chrono::steady_clock::now();
+
+        while (true) {
+            if (std::chrono::steady_clock::now() - lastActivity > silence) {
+                reply.kind = Reply::Kind::Silence;
+                return reply;
+            }
+
+            const SerialMessage message = protocolHandler_->receiveMessage();
+
+            if (message.code == MessageCodeType::UNAVAIABLE_SERIAL_PORT ||
+                message.rawMessage == "CONN_LOST" || message.rawMessage == "SERIAL_ERROR") {
+                reply.kind = Reply::Kind::PortError;
+                return reply;
+            }
+            if (message.type == MessageType::NONE) continue;
+
+            if (message.rawMessage.find(BOOT_BANNER) != std::string::npos ||
+                (SerialProtocolHandler::isValidMessage(message) && startsWith(message.payload, "BOOT "))) {
+                reply.kind = Reply::Kind::Reboot;
+                reply.text = startsWith(message.payload, "BOOT ") ? message.payload.substr(5) : readBootCause();
+                return reply;
+            }
+
+            lastActivity = std::chrono::steady_clock::now();
+            if (startsWith(message.rawMessage, "BUSY")) continue; // il firmware lavora: non e' silenzio
+            if (message.type == MessageType::INVALID) {
+                Logger::logWarning("[CommandExecutor] Discarded line without valid checksum: " + message.rawMessage);
+                continue;
+            }
+            if (message.type == MessageType::INFORMATIONAL || message.type == MessageType::CRITICAL) {
+                reply.body.push_back(message.payload);
+                continue;
+            }
+
+            reply.kind = Reply::Kind::Terminal;
+            reply.code = message.code;
+            reply.number = SerialProtocolHandler::fetchMessageCommandNumber(message);
+            reply.completed = SerialProtocolHandler::fetchCompletedNumber(message);
+            reply.text = message.payload;
+            return reply;
+        }
+    }
+
+    void CommandExecutor::popFront() {
+        pendingBytes_ -= pending_.front().frame.size();
+        pending_.pop_front();
+    }
+
+    void CommandExecutor::abandonWindow() {
+        // Ogni frame in volo riceve comunque la sua risposta (rifiuto): si lasciano arrivare
+        // tutte, cosi' non restano righe vecchie davanti al comando successivo.
+        size_t expected = pending_.size();
+        while (expected > 0) {
+            const Reply reply = nextReply(timing_.windowQuiet);
+            if (reply.kind != Reply::Kind::Terminal) break;
+            --expected;
+        }
+        pending_.clear();
+        pendingBytes_ = 0;
+    }
+
+    bool CommandExecutor::resendFrom(uint32_t expected) {
+        // Le risposte dei frame successivi a quello perso (tutte E04) sono ancora in arrivo
+        while (true) {
+            const Reply reply = nextReply(timing_.windowQuiet);
+            if (reply.kind == Reply::Kind::Silence) break;
+            if (reply.kind != Reply::Kind::Terminal) return false;
+        }
+
+        // Quelli prima di `expected` il firmware li ha accettati
+        while (!pending_.empty() && pending_.front().number < expected) popFront();
+        if (!pending_.empty() && pending_.front().number != expected) return false; // numerazione persa
+
+        for (const auto &move: pending_) protocolHandler_->sendRaw(move.frame);
+        return true;
+    }
+
+    types::Result CommandExecutor::settleOldest() {
+        types::Result result;
+        result.code = types::ResultCode::Success;
+        if (pending_.empty()) return result;
+
+        const uint32_t number = pending_.front().number;
+        result.commandNumber = number;
+        int attempts = 1;
+
+        const auto fail = [&](types::ResultCode code, const std::string &message) {
+            result.code = code;
+            result.message = message;
+            return result;
+        };
+
+        while (true) {
+            const Reply reply = nextReply(timing_.inactivity);
+
+            if (reply.kind == Reply::Kind::PortError) {
+                pending_.clear();
+                pendingBytes_ = 0;
+                return fail(types::ResultCode::Error, "Serial port not available");
+            }
+            if (reply.kind == Reply::Kind::Reboot) {
+                pending_.clear();
+                pendingBytes_ = 0;
+                Logger::logError("[CommandExecutor] Firmware reboot detected (cause: " + reply.text + ")");
+                return fail(types::ResultCode::SyncLost, "Firmware reboot detected (cause: " + reply.text + ")");
+            }
+
+            const bool resendRequested = reply.kind == Reply::Kind::Terminal &&
+                                         (reply.code == MessageCodeType::CHECKSUM_ERROR ||
+                                          reply.code == MessageCodeType::RESEND_COMMAND_ERROR);
+
+            if (reply.kind == Reply::Kind::Silence || resendRequested) {
+                // Frame corrotto, frame perso o risposta persa: si rispedisce dal primo non accettato.
+                // I frame gia' accettati rispondono E03 e non vengono eseguiti due volte.
+                if (++attempts > timing_.maxAttempts) {
+                    pending_.clear();
+                    pendingBytes_ = 0;
+                    return fail(types::ResultCode::Timeout,
+                                reply.kind == Reply::Kind::Silence ? "No response from firmware"
+                                                                   : "Move frames rejected repeatedly");
+                }
+                const uint32_t expected = resendRequested && reply.number ? *reply.number : number;
+                Logger::logWarning("[CommandExecutor] Resending moves from N" + std::to_string(expected));
+                if (expected < number || !resendFrom(expected)) {
+                    pending_.clear();
+                    pendingBytes_ = 0;
+                    result.commandNumber = reply.number;
+                    return fail(types::ResultCode::Resend, "Firmware expects N" + std::to_string(expected));
+                }
+                if (pending_.empty() || pending_.front().number != number) {
+                    // il piu' vecchio risulta accettato: la sua risposta era quella persa
+                    return result;
+                }
+                continue;
+            }
+
+            if (!reply.number || *reply.number != number) continue; // risposta di un frame gia' risolto
+
+            if (reply.completed) windowCompleted_ = reply.completed;
+            result.completedNumber = windowCompleted_;
+            result.body = reply.body;
+
+            switch (reply.code) {
+                case MessageCodeType::OK:
+                case MessageCodeType::DUPLICATE_COMMAND_ERROR:
+                    popFront();
+                    result.message = "Move queued";
+                    return result;
+                case MessageCodeType::REJECTED_ERROR: {
+                    std::string message = "Rejected by firmware";
+                    for (const auto &line: reply.body) {
+                        if (startsWith(line, "ERR ")) message = "Rejected by firmware: " + line.substr(4);
+                    }
+                    popFront();
+                    abandonWindow(); // il firmware scarta anche quelli che seguono
+                    return fail(types::ResultCode::Rejected, message);
+                }
+                case MessageCodeType::BLOCKED_MOTION_ERROR:
+                case MessageCodeType::BLOCKED_TEMP_ERROR: {
+                    std::string message = "Firmware is in error state";
+                    for (const auto &line: reply.body) {
+                        if (startsWith(line, "ERR ")) message = "Firmware is in error state: " + line.substr(4);
+                    }
+                    popFront();
+                    abandonWindow();
+                    return fail(types::ResultCode::Busy, message);
+                }
+                default:
+                    popFront();
+                    abandonWindow();
+                    return fail(types::ResultCode::Error, "Unknown response: " + reply.text);
+            }
+        }
+    }
+
+    types::Result CommandExecutor::drainLocked() {
+        types::Result result;
+        result.code = types::ResultCode::Success;
+        while (!pending_.empty()) {
+            result = settleOldest();
+            if (!result.isSuccess()) return result;
+        }
+        result.completedNumber = windowCompleted_;
+        return result;
+    }
+
+    types::Result CommandExecutor::drainMoves() {
+        std::lock_guard<std::mutex> lock(serialMutex_);
+        return drainLocked();
+    }
+
+    bool CommandExecutor::hasPendingMoves() {
+        std::lock_guard<std::mutex> lock(serialMutex_);
+        return !pending_.empty();
+    }
+
+    std::optional<uint32_t> CommandExecutor::lastWindowCompleted() {
+        std::lock_guard<std::mutex> lock(serialMutex_);
+        return windowCompleted_;
+    }
+
+    types::Result CommandExecutor::submitMove(const std::string &frame, uint32_t commandNumber, bool wait) {
+        std::lock_guard<std::mutex> lock(serialMutex_);
+
+        types::Result result;
+        result.code = types::ResultCode::Success;
+        result.commandNumber = commandNumber;
+
+        if (!protocolHandler_->isOpen()) {
+            result.code = types::ResultCode::Error;
+            result.message = "Serial port not available";
+            return result;
+        }
+
+        // Spazio nella finestra: prima si risolvono i piu' vecchi
+        while (pending_.size() >= WINDOW_FRAMES || pendingBytes_ + frame.size() > WINDOW_BYTES) {
+            const types::Result oldest = settleOldest();
+            if (!oldest.isSuccess()) return oldest; // questo frame non e' stato inviato
+        }
+
+        protocolHandler_->sendRaw(frame);
+        pending_.push_back({commandNumber, frame});
+        pendingBytes_ += frame.size();
+
+        if (wait) {
+            types::Result drained = drainLocked();
+            if (drained.isSuccess()) drained.commandNumber = commandNumber;
+            return drained;
+        }
+        result.completedNumber = windowCompleted_;
+        result.message = "Move sent";
+        return result;
+    }
+
     std::string CommandExecutor::readBootCause() {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
         while (std::chrono::steady_clock::now() < deadline) {

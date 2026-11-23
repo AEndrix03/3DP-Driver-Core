@@ -85,6 +85,30 @@ namespace core {
         uint32_t sequenceEpoch() const { return sequenceEpoch_.load(); }
 
         /**
+         * @brief Invia un movimento in formato binario: step relativi gia' calcolati.
+         * @param delta step con segno per X, Y, Z, E
+         * @param feedrate mm/min, 0 = invariata
+         * @param pipelined true = non attende la risposta (fino a 4 movimenti in volo);
+         *        un errore viene restituito da una chiamata successiva o segnalato come
+         *        guasto al primo comando di testo.
+         */
+        types::Result sendMove(const int32_t delta[4], uint32_t feedrate, bool pipelined) const;
+
+        /**
+         * @brief Attende le risposte dei movimenti ancora in volo. Un errore diventa un guasto
+         * (faultEpoch): da chiamare prima di considerare concluso un gruppo di movimenti.
+         */
+        void flushMoves() const;
+
+        /**
+         * @brief Versione della posizione nota al driver. Cambia ogni volta che la posizione
+         * del firmware puo' essere diversa da quella calcolata qui (arresto, allarme, homing,
+         * posizione impostata, movimento rifiutato, risincronizzazione): chi tiene una copia
+         * della posizione deve rileggerla dal firmware.
+         */
+        uint64_t positionEpoch() const { return positionEpoch_.load(); }
+
+        /**
          * @brief Attende che il firmware abbia eseguito tutti i movimenti in coda.
          * @return false su timeout o guasto
          */
@@ -105,6 +129,17 @@ namespace core {
         mutable std::atomic<uint32_t> lastIssued_{0};
         mutable std::atomic<uint32_t> lastCompleted_{0};
         mutable std::atomic<uint32_t> sequenceEpoch_{0};
+        mutable std::atomic<uint64_t> positionEpoch_{0};
+        mutable std::atomic<bool> abortSent_{false};
+
+        /// Corpo di sendCommandInternal. Richiede commandMutex_.
+        types::Result sendTextLocked(char category, int code, const std::vector<std::string> &params) const;
+
+        /// Attende le risposte dei movimenti in volo e ne gestisce l'esito. Richiede commandMutex_.
+        void drainMovesLocked() const;
+
+        /// Effetti di un movimento fallito su stato, guasti e copia della posizione.
+        void handleMoveFailure(const types::Result &result, bool reportFault) const;
 
         /// Handshake "N0 S10": riallinea numerazione e stato. Richiede commandMutex_.
         bool resyncLocked() const;

@@ -131,6 +131,9 @@ namespace core {
 
                     beginLine(command);
                     executeCommand(command);
+                    // Ultimo comando del job: i movimenti ancora in volo devono aver risposto
+                    // prima di poter dire che il job e' finito (o fallito).
+                    if (driver && isLastOfJob(command.jobId)) driver->flushMoves();
                     executedCount++;
                     lastExecutionTime_ = std::chrono::steady_clock::now();
 
@@ -284,6 +287,13 @@ namespace core {
             callback = jobFaultCallback_;
         }
         if (callback) callback(jobId, reason);
+    }
+
+    bool CommandExecutorQueue::isLastOfJob(const std::string &jobId) const {
+        if (jobId.empty()) return false;
+        std::lock_guard<std::mutex> lock(queueMutex_);
+        const auto it = pendingByJob_.find(jobId);
+        return it != pendingByJob_.end() && it->second == 1;
     }
 
     bool CommandExecutorQueue::markCommandDone(const std::string &jobId) {

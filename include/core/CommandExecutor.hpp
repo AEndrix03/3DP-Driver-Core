@@ -13,6 +13,8 @@
 #include <mutex>
 #include <chrono>
 #include <cstdint>
+#include <deque>
+#include <optional>
 
 namespace core {
 
@@ -37,6 +39,8 @@ namespace core {
             std::chrono::milliseconds retryDelay{100};
             /// Invii massimi dello stesso comando (checksum errato o timeout)
             int maxAttempts = 3;
+            /// Silenzio sulla linea che chiude lo scambio dopo un errore nella finestra dei movimenti
+            std::chrono::milliseconds windowQuiet{120};
         };
 
         CommandExecutor(std::shared_ptr<SerialPort> serial, std::shared_ptr<CommandContext> context);
@@ -48,6 +52,35 @@ namespace core {
          */
         types::Result sendCommandAndAwaitResponse(const std::string &command, uint32_t commandNumber);
 
+        /// Movimenti binari che possono essere in volo senza risposta.
+        static constexpr size_t WINDOW_FRAMES = 4;
+        /// Byte in volo: sotto il buffer di ricezione del firmware (64), con margine.
+        static constexpr size_t WINDOW_BYTES = 56;
+
+        /**
+         * @brief Invia un movimento binario senza attendere la sua risposta.
+         *
+         * Al massimo WINDOW_FRAMES movimenti (e WINDOW_BYTES byte) restano in volo: se la
+         * finestra e' piena attende prima la risposta del piu' vecchio. Un errore su un
+         * movimento precedente viene restituito qui (o da drainMoves): a quel punto la
+         * finestra e' vuota e il firmware scarta i movimenti rimasti in volo.
+         *
+         * Dopo un frame corrotto o una risposta persa i movimenti in volo vengono rispediti
+         * dal primo che il firmware non ha accettato (i duplicati rispondono E03).
+         *
+         * @param wait true = attende anche la risposta di questo movimento
+         */
+        types::Result submitMove(const std::string &frame, uint32_t commandNumber, bool wait);
+
+        /// Attende la risposta di tutti i movimenti in volo.
+        types::Result drainMoves();
+
+        /// true se ci sono movimenti in volo.
+        bool hasPendingMoves();
+
+        /// Ultimo "D" letto in una risposta ai movimenti.
+        std::optional<uint32_t> lastWindowCompleted();
+
         void setTiming(const Timing &timing) { timing_ = timing; }
 
         const Timing &timing() const { return timing_; }
@@ -58,6 +91,39 @@ namespace core {
         std::mutex serialMutex_;
         std::shared_ptr<SerialProtocolHandler> protocolHandler_;
         Timing timing_;
+
+        struct PendingMove {
+            uint32_t number;
+            std::string frame;
+        };
+        std::deque<PendingMove> pending_; // protetta da serialMutex_
+        size_t pendingBytes_ = 0;
+        std::optional<uint32_t> windowCompleted_;
+
+        /// Una riga terminale qualunque (non filtrata per numero), con le righe informative che la precedono.
+        struct Reply {
+            enum class Kind { Terminal, Silence, PortError, Reboot } kind = Kind::Silence;
+            MessageCodeType code = MessageCodeType::OK;
+            std::optional<uint32_t> number;
+            std::optional<uint32_t> completed;
+            std::vector<std::string> body;
+            std::string text;
+        };
+
+        Reply nextReply(std::chrono::milliseconds silence);
+
+        /// Risolve il movimento piu' vecchio in volo. Richiede serialMutex_.
+        types::Result settleOldest();
+
+        types::Result drainLocked();
+
+        void popFront();
+
+        /// Scarta i movimenti in volo e le loro risposte (dopo un rifiuto o un errore macchina).
+        void abandonWindow();
+
+        /// Dopo E01/E04: lascia arrivare le risposte rimaste, poi rispedisce da `expected`.
+        bool resendFrom(uint32_t expected);
 
         /**
          * @brief Legge finche' non arriva la risposta terminale di expectedNumber.

@@ -126,6 +126,28 @@ public:
         sim::hostWrite(out + "\n");
     }
 
+    void sendRaw(const std::string &bytes) override {
+        std::string out = bytes;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ++framesSent_;
+            if (dropTx_ > 0) {
+                --dropTx_;
+                return;
+            }
+            if (corruptTx_ > 0) {
+                --corruptTx_;
+                out[out.size() / 2] ^= 0x01;
+            }
+        }
+        sim::hostWrite(out);
+    }
+
+    int framesSent() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return framesSent_;
+    }
+
     std::string receiveLine() override {
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -183,6 +205,7 @@ private:
     int dropTx_ = 0;
     int corruptTx_ = 0;
     int commandsSent_ = 0;
+    int framesSent_ = 0;
 };
 
 static std::string withChecksum(const std::string &payload) {
@@ -982,6 +1005,104 @@ namespace {
     const long E_PER_LINE = static_cast<long>(E_PER_MOVE * 80);
 }
 
+static void testShortSegmentStream() {
+    normalize();
+    CHECK(driver->system()->startPrint().isSuccess());
+
+    // Curva fitta: 800 segmenti da 0,1 mm a 80 mm/s, inviati senza attendere ogni risposta.
+    // Il firmware riceve piu' in fretta di quanto esegue: non deve bloccarsi ne' perdere step.
+    const int before = port->framesSent();
+    bool ok = true;
+    for (int i = 0; i < 800 && ok; ++i) {
+        const auto result = driver->motion()->moveRelative(
+                {0.1, i % 2 == 0 ? 0.05 : -0.05, std::nullopt, 0.0125, i == 0 ? std::optional<double>(4800.0)
+                                                                              : std::nullopt}, true);
+        ok = result.isSuccess();
+        if (!ok) CHECK_MSG(false, "segment " + std::to_string(i) + ": " + result.message);
+    }
+    CHECK(idle());
+    CHECK(!driver->isLinkFaulted());
+    CHECK(port->framesSent() - before == 800); // nessuna ritrasmissione
+    CHECK_MSG(sim::steps().x == 6400 && sim::steps().y == 0 && sim::steps().e == 800,
+              "x=" + std::to_string(sim::steps().x) + " y=" + std::to_string(sim::steps().y) +
+              " e=" + std::to_string(sim::steps().e));
+}
+
+/// Invia `count` segmenti da 0,5 mm lungo X senza attendere le risposte. Ritorna false al primo errore.
+static bool streamSegments(int count) {
+    for (int i = 0; i < count; ++i) {
+        const auto result = driver->motion()->moveRelative(
+                {0.5, std::nullopt, std::nullopt, 0.025, i == 0 ? std::optional<double>(3000.0) : std::nullopt}, true);
+        if (!result.isSuccess()) return false;
+    }
+    return true;
+}
+
+static void testStreamFaults() {
+    // --- un frame arriva corrotto a meta' flusso: rispedito, nessuno step perso o doppio ---
+    normalize();
+    CHECK(driver->system()->startPrint().isSuccess());
+    int before = port->framesSent();
+    CHECK(streamSegments(20));
+    port->corruptNextCommands(1);
+    CHECK(streamSegments(40));
+    CHECK(idle());
+    CHECK(!driver->isLinkFaulted());
+    CHECK(port->framesSent() - before > 60); // c'e' stata almeno una ritrasmissione
+    CHECK_MSG(sim::steps().x == 60 * 40 && sim::steps().e == 60 * 2,
+              "x=" + std::to_string(sim::steps().x) + " e=" + std::to_string(sim::steps().e));
+
+    // --- un frame non arriva affatto ---
+    normalize();
+    CHECK(driver->system()->startPrint().isSuccess());
+    CHECK(streamSegments(20));
+    port->dropNextCommands(1);
+    CHECK(streamSegments(40));
+    CHECK(idle());
+    CHECK(!driver->isLinkFaulted());
+    CHECK_MSG(sim::steps().x == 60 * 40 && sim::steps().e == 60 * 2,
+              "x=" + std::to_string(sim::steps().x) + " e=" + std::to_string(sim::steps().e));
+
+    // --- una risposta va persa: il movimento era stato accettato, non va eseguito due volte ---
+    normalize();
+    CHECK(driver->system()->startPrint().isSuccess());
+    CHECK(streamSegments(20));
+    port->dropNextFromFirmware("OK0", 1);
+    CHECK(streamSegments(40));
+    CHECK(idle());
+    CHECK(!driver->isLinkFaulted());
+    CHECK_MSG(sim::steps().x == 60 * 40 && sim::steps().e == 60 * 2,
+              "x=" + std::to_string(sim::steps().x) + " e=" + std::to_string(sim::steps().e));
+
+    // --- un movimento viene rifiutato: quelli gia' in volo dietro di lui non partono ---
+    normalize();
+    sim::setEndstop(0, -800);
+    sim::setEndstop(1, -800);
+    sim::setEndstop(2, -400);
+    CHECK(driver->system()->homing().isSuccess());
+    CHECK(driver->system()->startPrint().isSuccess());
+    const auto home = sim::steps();
+    const uint64_t faults = driver->faultEpoch();
+    CHECK(driver->motion()->moveAbsolute({10.0, 10.0, std::nullopt, std::nullopt, 6000.0}, true).isSuccess());
+    driver->motion()->moveAbsolute({300.0, 10.0, std::nullopt, std::nullopt, std::nullopt}, true); // fuori corsa
+    driver->motion()->moveAbsolute({20.0, 20.0, std::nullopt, std::nullopt, std::nullopt}, true);
+    driver->motion()->moveAbsolute({30.0, 30.0, std::nullopt, std::nullopt, std::nullopt}, true);
+    // Il primo comando di testo chiude i movimenti in volo e scopre il rifiuto: e' un guasto,
+    // quindi l'attesa si interrompe subito invece di far finta di niente.
+    CHECK(!idle());
+    CHECK(driver->faultEpoch() > faults);
+    CHECK(idle()); // il movimento valido accodato prima del rifiuto viene comunque completato
+    CHECK_MSG(driver->lastFaultReason().find("LIMIT") != std::string::npos, driver->lastFaultReason());
+    // fermo sull'ultima posizione valida: X10 Y10 dallo zero dei finecorsa
+    CHECK_MSG(sim::steps().x == -800 + 800 && sim::steps().y == -800 + 800,
+              "x=" + std::to_string(sim::steps().x) + " y=" + std::to_string(sim::steps().y));
+    // e da li' si riparte, con la posizione riletta dal firmware
+    CHECK(driver->motion()->moveAbsolute({20.0, 10.0, std::nullopt, std::nullopt, 6000.0}).isSuccess());
+    CHECK(idle());
+    CHECK(sim::steps().x == -800 + 1600 && sim::steps().y == -800 + 800);
+    (void) home;
+}
+
 constexpr uint8_t ENABLE_PIN = 8; // LOW = motori alimentati
 
 static void testStackGuard() {
@@ -1401,6 +1522,8 @@ int main(int argc, char **argv) {
             {"full print job from file",           testFullPrintJob},
             {"large job keeps file order",         testLargeJobOrder},
             {"software travel limits",             testTravelLimits},
+            {"short segment stream (binary)",      testShortSegmentStream},
+            {"binary stream fault recovery",       testStreamFaults},
             {"motor enable pin",                   testMotorEnable},
             {"stack guard",                        testStackGuard},
             {"pause, park and resume",             testPauseAndResume},

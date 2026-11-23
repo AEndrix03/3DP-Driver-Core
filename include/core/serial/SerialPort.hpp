@@ -22,6 +22,11 @@ namespace core {
         virtual void send(const std::string &data) = 0;
 
         /**
+         * @brief Invia i byte cosi' come sono, senza fine riga (frame binari dei movimenti).
+         */
+        virtual void sendRaw(const std::string &bytes) = 0;
+
+        /**
          * @brief Riceve una linea dalla porta seriale.
          * @return Stringa ricevuta.
          */

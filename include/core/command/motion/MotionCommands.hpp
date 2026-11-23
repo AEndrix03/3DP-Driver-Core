@@ -8,6 +8,8 @@
 #include "./../../types/Result.hpp"
 #include "core/types/Position.hpp"
 #include <optional>
+#include <mutex>
+#include <cstdint>
 
 namespace core::command::motion {
 
@@ -32,11 +34,20 @@ namespace core::command::motion {
 
         types::Result emergencyStop();
 
-        /// M10: spostamento relativo
-        types::Result moveRelative(const MoveTarget &target);
+        /**
+         * @brief Spostamento relativo.
+         *
+         * I movimenti viaggiano in formato binario, in step: la conversione da millimetri
+         * (con il resto frazionario dell'estrusore) avviene qui, su una copia della posizione
+         * del firmware riletta ogni volta che puo' essere cambiata (vedi DriverInterface::positionEpoch).
+         *
+         * @param pipelined true = non attende la risposta: per il flusso di una stampa.
+         *        Un errore emerge alla chiamata successiva.
+         */
+        types::Result moveRelative(const MoveTarget &target, bool pipelined = false);
 
-        /// M11: spostamento a coordinate assolute (assi omessi invariati)
-        types::Result moveAbsolute(const MoveTarget &target);
+        /// Spostamento a coordinate assolute (assi omessi invariati; `e` resta relativo).
+        types::Result moveAbsolute(const MoveTarget &target, bool pipelined = false);
 
         /// M12: dichiara la posizione corrente (G92)
         types::Result setPosition(const MoveTarget &position);
@@ -56,6 +67,24 @@ namespace core::command::motion {
          */
         std::optional<position::Position> getPosition(bool *referenced = nullptr);
 
+    private:
+        /// Copia della posizione del firmware, in step.
+        struct StepMirror {
+            bool valid = false;
+            uint64_t epoch = 0;
+            long long position[3] = {0, 0, 0};
+            double stepsPerMm[4] = {0, 0, 0, 0};
+            double eRemainder = 0.0;   ///< frazione di step di estrusione non ancora inviata
+            double lastFeedrate = 0.0; ///< ultima velocita' inviata (il firmware la ricorda)
+        };
+
+        std::mutex mirrorMutex_;
+        StepMirror mirror_;
+
+        /// Rilegge dal firmware posizione e step/mm (M115).
+        types::Result syncMirror();
+
+        types::Result move(const MoveTarget &target, bool absolute, bool pipelined);
     };
 
 } // namespace core::printer-command::motion

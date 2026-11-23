@@ -210,5 +210,8 @@ namespace core {
 
         /// Aggiorna il conteggio del job; ritorna true se era l'ultimo comando.
         bool markCommandDone(const std::string &jobId);
+
+        /// true se al job resta un solo comando (quello in esecuzione).
+        bool isLastOfJob(const std::string &jobId) const;
     };
 } // namespace core

@@ -59,6 +59,10 @@ namespace core {
         }
     }
 
+    void SerialProtocolHandler::sendRaw(const std::string &bytes) {
+        if (isOpen()) serialPort_->sendRaw(bytes);
+    }
+
     bool SerialProtocolHandler::isOpen() const {
         return serialPort_ && serialPort_->isOpen();
     }
