@@ -982,6 +982,32 @@ namespace {
     const long E_PER_LINE = static_cast<long>(E_PER_MOVE * 80);
 }
 
+constexpr uint8_t ENABLE_PIN = 8; // LOW = motori alimentati
+
+static void testStackGuard() {
+    normalize();
+    CHECK(driver->system()->startPrint().isSuccess());
+    CHECK(driver->motion()->moveRelative({30.0, std::nullopt, std::nullopt, std::nullopt, 600.0}).isSuccess());
+    std::this_thread::sleep_for(200ms);
+
+    // Lo stack entra nella zona di guardia: il firmware si ferma prima di corrompere le variabili
+    sim::breakStackGuard(true);
+    CHECK(waitFor([&] { return sim::pinLevel(ENABLE_PIN); }, 3s)); // motori senza corrente
+    const long stopped = sim::steps().x;
+    std::this_thread::sleep_for(200ms);
+    CHECK(sim::steps().x == stopped && stopped < 2400);
+    CHECK(contains(driver->system()->errorStatus(), "STACK"));
+    CHECK(driver->motion()->moveRelative({1.0, std::nullopt, std::nullopt, std::nullopt, 600.0}).isBusy());
+
+    // Finche' la causa resta, azzerare l'errore non basta: l'allarme scatta di nuovo
+    driver->system()->clearError();
+    CHECK(waitFor([&] { return contains(driver->system()->errorStatus(), "STACK"); }, 2s));
+
+    sim::breakStackGuard(false);
+    CHECK(driver->system()->clearError().isSuccess());
+    CHECK(driver->waitForIdle(3s));
+}
+
 namespace {
     /// Registra l'ordine in cui la coda esegue le righe, senza traffico verso il firmware.
     struct OrderProbe : translator::gcode::ICommandDispatcher {
@@ -1029,8 +1055,6 @@ static void testLargeJobOrder() {
     CHECK(rig.queue->getQueueSize() == 0);
     std::filesystem::remove(path);
 }
-
-constexpr uint8_t ENABLE_PIN = 8; // LOW = motori alimentati
 
 static void testTravelLimits() {
     normalize();
@@ -1378,6 +1402,7 @@ int main(int argc, char **argv) {
             {"large job keeps file order",         testLargeJobOrder},
             {"software travel limits",             testTravelLimits},
             {"motor enable pin",                   testMotorEnable},
+            {"stack guard",                        testStackGuard},
             {"pause, park and resume",             testPauseAndResume},
             {"recover after link fault",           testRecoverAfterLinkFault},
             {"recover after firmware reboot",      testRecoverAfterFirmwareReboot},
