@@ -24,12 +24,12 @@ namespace translator::gcode {
 
     bool TemperatureDispatcher::canHandle(const std::string &command) const {
         return command == "M104" || command == "M109" || command == "M105" ||
-               command == "M140" || command == "M190";
+               command == "M140" || command == "M190" || command == "M301";
     }
 
     bool
     TemperatureDispatcher::validate(const std::string &command, const std::map<std::string, double> &params) const {
-        if (command == "M105") return true;
+        if (command == "M105" || command == "M301") return true;
         return params.count("S") || params.count("R");
     }
 
@@ -38,6 +38,14 @@ namespace translator::gcode {
 
         if (command == "M105") {
             driver_->temperature()->getHotendTemperature();
+            return;
+        }
+
+        if (command == "M301") {
+            // M301 P.. I.. D..: guadagni del PID dell'hotend (quelli omessi restano)
+            const auto gain = [&](const char *key) { return params.count(key) ? params.at(key) : -1.0; };
+            const auto result = driver_->temperature()->setPid(gain("P"), gain("I"), gain("D"));
+            if (!result.isSuccess()) throw std::runtime_error("PID gains not accepted: " + result.message);
             return;
         }
 

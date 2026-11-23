@@ -338,7 +338,20 @@ namespace core {
                 continue;
             }
 
-            if (!reply.number || *reply.number != number) continue; // risposta di un frame gia' risolto
+            if (!reply.number) continue;
+            if (*reply.number != number) {
+                // Conferma cumulativa: il firmware accetta i movimenti strettamente in ordine,
+                // quindi l'OK di un movimento successivo prova che anche quelli prima sono
+                // stati accettati. Una risposta persa non costa cosi' ne' un'attesa ne' un rinvio.
+                const bool laterAccepted = reply.code == MessageCodeType::OK && *reply.number > number &&
+                                           *reply.number <= pending_.back().number;
+                if (!laterAccepted) continue; // risposta di un frame gia' risolto
+                if (reply.completed) windowCompleted_ = reply.completed;
+                while (!pending_.empty() && pending_.front().number <= *reply.number) popFront();
+                result.completedNumber = windowCompleted_;
+                result.message = "Move queued (acknowledged by a later one)";
+                return result;
+            }
 
             if (reply.completed) windowCompleted_ = reply.completed;
             result.completedNumber = windowCompleted_;

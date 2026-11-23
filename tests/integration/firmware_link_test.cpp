@@ -571,6 +571,79 @@ static void testThermal() {
     sim::setTimeScale(1.0);
 }
 
+/// Minimo e massimo della temperatura del blocco simulato per `simSeconds` secondi simulati.
+static std::pair<double, double> observeTemperature(double simSeconds, double timeScale) {
+    double low = 1e9, high = -1e9;
+    const auto end = std::chrono::steady_clock::now() +
+                     std::chrono::milliseconds(static_cast<int>(simSeconds / timeScale * 1000));
+    int tick = 0;
+    while (std::chrono::steady_clock::now() < end) {
+        const double t = sim::modelTemperature();
+        low = std::min(low, t);
+        high = std::max(high, t);
+        std::this_thread::sleep_for(5ms);
+        // L'host resta presente, come durante una stampa: senza comandi per 5 minuti
+        // il firmware spegnerebbe l'heater (HOST_LOST).
+        if (++tick % 20 == 0) driver->temperature()->getHotendTemperature();
+    }
+    return {low, high};
+}
+
+static void testPidRegulation() {
+    normalize();
+    constexpr double SCALE = 40.0;
+    // Hotend simulato con inerzia termica: il termistore segue il pin dell'heater
+    sim::enableThermalModel(true, 25.0);
+    sim::enableThermistor(true);
+    sim::setTimeScale(SCALE);
+    std::this_thread::sleep_for(100ms);
+
+    // --- salita a 200 gradi: arriva, senza sforare e senza oscillare ---
+    CHECK(driver->temperature()->setHotendTemperature(200).isSuccess());
+    double peak = 0.0;
+    const bool reached = waitFor([&] {
+        peak = std::max(peak, sim::modelTemperature());
+        driver->temperature()->getHotendTemperature();
+        return sim::modelTemperature() >= 198.0;
+    }, 15s); // 600 s simulati al massimo
+    CHECK_MSG(reached, "temperature " + std::to_string(sim::modelTemperature()));
+    peak = std::max(peak, observeTemperature(120.0, SCALE).second); // assestamento
+    CHECK_MSG(peak < 205.0, "overshoot: peak " + std::to_string(peak));
+
+    auto [low, high] = observeTemperature(120.0, SCALE);
+    CHECK_MSG(high - low < 2.0, "ripple " + std::to_string(high - low));
+    CHECK_MSG(std::fabs((high + low) / 2 - 200.0) < 1.0, "regime " + std::to_string((high + low) / 2));
+    CHECK(contains(driver->system()->printStatus(), "STA Idle")); // nessuna protezione scattata
+
+    // --- cambio di target verso l'alto ---
+    CHECK(driver->temperature()->setHotendTemperature(220).isSuccess());
+    CHECK(waitFor([&] { return sim::modelTemperature() >= 218.5; }, 10s));
+    peak = observeTemperature(100.0, SCALE).second;
+    CHECK_MSG(peak < 225.0, "overshoot on step: peak " + std::to_string(peak));
+    std::tie(low, high) = observeTemperature(100.0, SCALE);
+    CHECK_MSG(high - low < 2.0 && std::fabs((high + low) / 2 - 220.0) < 1.0,
+              "regime " + std::to_string(low) + ".." + std::to_string(high));
+
+    // --- i guadagni si tarano senza riprogrammare ---
+    auto gains = driver->temperature()->setPid(18.5, 0.9, 80.0);
+    CHECK_MSG(gains.isSuccess() && contains(gains, "PID 18.50 0.900 80.0"), gains.message);
+    gains = driver->temperature()->setPid(22.0, 1.08, 114.0);
+    CHECK(contains(gains, "PID 22.00 1.080 114.0"));
+
+    // --- spegnimento: l'heater resta spento e la temperatura scende ---
+    CHECK(driver->temperature()->setHotendTemperature(0).isSuccess());
+    std::this_thread::sleep_for(200ms);
+    const double afterOff = sim::modelTemperature();
+    CHECK(!sim::pinLevel(15 /* A1: heater */));
+    observeTemperature(60.0, SCALE);
+    CHECK(sim::modelTemperature() < afterOff - 10.0);
+    CHECK(!sim::pinLevel(15));
+
+    sim::setTimeScale(1.0);
+    sim::enableThermistor(false);
+    sim::enableThermalModel(false);
+}
+
 static void testLongRunningClocks() {
     normalize();
 
@@ -1067,10 +1140,14 @@ static void testStreamFaults() {
     normalize();
     CHECK(driver->system()->startPrint().isSuccess());
     CHECK(streamSegments(20));
+    before = port->framesSent();
     port->dropNextFromFirmware("OK0", 1);
     CHECK(streamSegments(40));
     CHECK(idle());
     CHECK(!driver->isLinkFaulted());
+    // la conferma di un movimento successivo vale anche per quello rimasto senza risposta:
+    // niente attesa e niente rinvio
+    CHECK(port->framesSent() - before == 40);
     CHECK_MSG(sim::steps().x == 60 * 40 && sim::steps().e == 60 * 2,
               "x=" + std::to_string(sim::steps().x) + " e=" + std::to_string(sim::steps().e));
 
@@ -1514,6 +1591,7 @@ int main(int argc, char **argv) {
             {"motion abort",                       testAbortMotion},
             {"lookahead and speed profile",        testLookahead},
             {"thermal control and protections",    testThermal},
+            {"PID temperature regulation",         testPidRegulation},
             {"18h / millis / micros rollover",     testLongRunningClocks},
             {"arc and spline flattening",          testGeometry},
             {"g-code translation",                 testGCodeTranslation},

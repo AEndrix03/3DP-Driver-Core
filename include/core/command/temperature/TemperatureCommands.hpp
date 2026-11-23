@@ -23,6 +23,12 @@ namespace core::command::temperature {
         types::Result getHotendTemperature();
 
         types::Result getBedTemperature();
+
+        /**
+         * @brief Guadagni del PID dell'hotend (T40). I valori negativi restano invariati;
+         * la risposta riporta sempre quelli in uso: "PID <kp> <ki> <kd> <uscita 0-255>".
+         */
+        types::Result setPid(double kp, double ki, double kd);
     };
 
 } // namespace core::printer-command::temperature

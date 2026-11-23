@@ -45,6 +45,14 @@ namespace core::command::temperature {
         return types::Result::success("Heated bed not supported");
     }
 
+    types::Result TemperatureCommands::setPid(double kp, double ki, double kd) {
+        std::vector<std::string> params;
+        if (kp >= 0.0) params.push_back("P" + utils::formatFloat(kp, 2));
+        if (ki >= 0.0) params.push_back("I" + utils::formatFloat(ki, 3));
+        if (kd >= 0.0) params.push_back("D" + utils::formatFloat(kd, 1));
+        return sendCommand('T', 40, params);
+    }
+
     types::Result TemperatureCommands::getHotendTemperature() {
         // Firmware: T20 -> "CRT TMP <attuale> <target>"
         auto result = sendCommand('T', 20, {});
