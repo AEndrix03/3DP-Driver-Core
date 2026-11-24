@@ -165,7 +165,10 @@ public:
         if (line.empty()) return "";
 
         std::lock_guard<std::mutex> lock(mutex_);
-        if (dropRx_ > 0 && line.rfind(dropRxPrefix_, 0) == 0) {
+        // "OK0" vale anche per la conferma corta dei movimenti (4 byte con il bit 7 a 1)
+        core::MoveFrame::Ack ack;
+        const bool moveAck = dropRxPrefix_ == "OK0" && core::MoveFrame::decodeAck(line, ack);
+        if (dropRx_ > 0 && (moveAck || line.rfind(dropRxPrefix_, 0) == 0)) {
             --dropRx_;
             return "";
         }
@@ -899,18 +902,28 @@ static void testStopGuarantee() {
     CHECK(rates.size() >= 1190);
     if (rates.size() >= 1190) {
         double fastest = 0.0, worst = 0.0;
+        size_t worstAt = 0;
         for (const double r: rates) fastest = std::max(fastest, r);
         // Finestre di 64 step: a 8000 step/s un tick di timer vale 32 step/s, e su finestre
         // piu' corte la quantizzazione dell'intervallo pesa piu' dell'accelerazione misurata.
         for (size_t i = 0; i + 64 < rates.size(); ++i) {
             double dt = 0.0;
             for (size_t k = i; k < i + 64; ++k) dt += 1.0 / rates[k];
-            worst = std::max(worst, std::fabs(rates[i + 64] - rates[i]) / dt);
+            const double here = std::fabs(rates[i + 64] - rates[i]) / dt;
+            if (here > worst) {
+                worst = here;
+                worstAt = i;
+            }
+        }
+        std::string around;
+        for (size_t i = worstAt; i <= worstAt + 64 && i < rates.size(); i += 4) {
+            around += std::to_string(static_cast<int>(rates[i])) + " ";
         }
         // parte da fermo e arriva da fermo, sempre entro l'accelerazione (80000 step/s^2)
         CHECK_MSG(rates.front() < 600.0, "first rate " + std::to_string(rates.front()));
         CHECK_MSG(rates.back() < 600.0, "last rate " + std::to_string(rates.back()));
-        CHECK_MSG(worst < 80000.0 * 1.10, "peak acceleration (steps/s^2) " + std::to_string(worst));
+        CHECK_MSG(worst < 80000.0 * 1.10, "peak acceleration (steps/s^2) " + std::to_string(worst) +
+                                          " at step " + std::to_string(worstAt) + ": " + around);
         CHECK_MSG(fastest > 6000.0 && fastest < 8010.0, "fastest rate " + std::to_string(fastest));
     }
 

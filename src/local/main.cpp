@@ -16,6 +16,7 @@
 #define _WIN32_WINNT 0x0A00
 #endif
 #endif
+#include "core/serial/LinuxBaud.hpp"
 #include "../../third_party/httplib.h"
 
 #include "WebUi.hpp"
@@ -141,7 +142,7 @@ namespace {
     public:
         Service(const std::string &device, const std::string &dataDir)
                 : dataDir_(dataDir), history_((std::filesystem::path(dataDir) / "history.sqlite").string()) {
-            port_ = std::make_shared<local::NativeSerialPort>(device, 115200);
+            port_ = std::make_shared<local::NativeSerialPort>(device, core::DEFAULT_SERIAL_BAUD);
         }
 
         bool start(std::string &error) {
@@ -211,6 +212,7 @@ namespace {
                 << ",\"percent\":" << number(info ? info->getProgress() : 0.0, 2)
                 << ",\"linesDone\":" << (info ? info->executedCommands : 0)
                 << ",\"linesTotal\":" << (info ? info->totalCommands : 0) << "}"
+                << ",\"linearAdvance\":" << driver_->motion()->linearAdvance()
                 << ",\"temperature\":{\"known\":" << (tempKnown_ ? "true" : "false")
                 << ",\"current\":" << number(tempCurrent_, 1) << ",\"target\":" << number(tempTarget_, 1) << "}"
                 << ",\"position\":{\"known\":" << (posKnown_ ? "true" : "false")
@@ -265,6 +267,13 @@ namespace {
                 if (!percent) return reply(false, "missing s=<percent>");
                 return reply(*percent <= 0 ? driver_->fan()->turnOff()
                                            : driver_->fan()->setFanSpeed(static_cast<int>(*percent)));
+            }
+            if (name == "advance") {
+                // Linear advance: vale dai movimenti successivi, anche a stampa in corso
+                const auto k = numberParam(params, "k");
+                if (!k || *k < 0.0 || *k > 2.0) return reply(false, "missing or invalid k=<0..2 seconds>");
+                driver_->motion()->setLinearAdvance(*k);
+                return reply(true, "linear advance set");
             }
             if (name == "upload") return upload(params, body);
             if (name == "check") {
@@ -555,6 +564,7 @@ namespace {
             else if (name == "gcode") params.emplace("line", argument);
             else if (name == "home") params.emplace("axes", argument);
             else if (name == "temp" || name == "fan") params.emplace("s", argument);
+            else if (name == "advance") params.emplace("k", argument);
         }
 
         httplib::Result result{nullptr, httplib::Error::Unknown};
@@ -594,6 +604,7 @@ namespace {
                   "  3dp status | history | diag\n"
                   "  3dp home [XYZ]            3dp jog x=10 y=-5 z=1 e=2 f=3000\n"
                   "  3dp temp <degrees>        3dp fan <percent>\n"
+                  "  3dp advance <K>           linear advance in seconds, 0 = off (same as M900 K)\n"
                   "  3dp gcode \"G1 X10 F3000\"\n"
                   "  3dp upload <file.gcode>   3dp print <file.gcode> [name=...] [force=1]\n"
                   "  3dp check <file.gcode>    what the driver would do with the file (no printer needed)\n"

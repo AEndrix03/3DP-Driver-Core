@@ -89,6 +89,12 @@ th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); 
       <label>Ventola <input id="fan" type="number" value="100"> %</label>
       <button onclick="api('fan','s='+val('fan'))">Imposta</button>
     </div>
+    <div class="row">
+      <label title="Secondi. Compensa la pressione nell'ugello: 0 = spento. Da tarare sulla macchina (0,03-0,1 con estrusore diretto, 0,3-0,8 con bowden).">Linear advance K
+        <input id="advance" type="number" value="0" min="0" max="2" step="0.01"></label>
+      <button onclick="api('advance','k='+val('advance'))">Imposta</button>
+      <span style="color:var(--muted)">attuale: <span id="advanceNow">-</span></span>
+    </div>
   </div>
 
   <div class="card">
@@ -172,6 +178,7 @@ async function refresh() {
     $('state').className = s.state === 'Error' ? 'bad' : '';
     $('job').textContent = s.job.id ? s.job.state + '  ' + s.job.percent.toFixed(1) + '%  (' + s.job.linesDone + '/' + s.job.linesTotal + ')' : 'nessuna';
     $('progress').style.width = (s.job.id ? s.job.percent : 0) + '%';
+    $('advanceNow').textContent = s.linearAdvance > 0 ? s.linearAdvance.toFixed(3) + ' s' : 'spento';
     $('temp').textContent = s.temperature.known ? s.temperature.current.toFixed(1) + ' / ' + s.temperature.target.toFixed(0) + ' °C' : 'sensore non attivo';
     $('pos').textContent = s.position.known ? 'X' + s.position.x.toFixed(2) + ' Y' + s.position.y.toFixed(2) + ' Z' + s.position.z.toFixed(2) + (s.position.referenced ? '' : ' (non riferita)') : '-';
     $('queue').textContent = s.queue;

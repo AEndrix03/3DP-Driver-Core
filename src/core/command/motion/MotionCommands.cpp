@@ -65,9 +65,9 @@ namespace core::command::motion {
                                                       >> mirror_.travelMax[2] >> mirror_.limitedAxes);
                 } else if (token == "LIM") {
                     // velocita' massime (mm/min) X Y Z E, accelerazioni XY Z E, deviazione di giunzione
-                    // (micron), step/s massimi, blocchi utilizzabili della coda
+                    // (micron), step/s massimi, blocchi utilizzabili della coda, buffer di ricezione (byte)
                     double feed[4], accelXY, accelZ, accelE, deviation, stepRate;
-                    int queue;
+                    int queue, receiveBuffer = 64;
                     if (iss >> feed[0] >> feed[1] >> feed[2] >> feed[3] >> accelXY >> accelZ >> accelE
                             >> deviation >> stepRate >> queue) {
                         for (int a = 0; a < 4; ++a) limits.maxFeed[a] = feed[a] / 60.0;
@@ -77,6 +77,8 @@ namespace core::command::motion {
                         limits.junctionDeviation = deviation / 1000.0;
                         limits.maxStepRate = stepRate;
                         limits.queueBlocks = queue;
+                        iss >> receiveBuffer;
+                        driver_->executor()->setReceiveBuffer(static_cast<size_t>(receiveBuffer));
                         gotLimits = true;
                     }
                 }

@@ -1,6 +1,7 @@
 #include "core/serial/impl/RealSerialPort.hpp"
 #include "logger/Logger.hpp"
 #include "core/MoveFrame.hpp"
+#include "core/serial/LinuxBaud.hpp"
 #include <boost/system/error_code.hpp>
 #include <iostream>
 #include <thread>
@@ -52,6 +53,12 @@ namespace core {
         if (ec) {
             Logger::logWarning("[SerialPort] Failed to set baud rate: " + ec.message());
         }
+#ifdef __linux__
+        // 250000 non e' tra i baud che termios conosce per nome: va chiesto come numero.
+        // Fatto per ultimo (in fondo a questa funzione) perche' le altre opzioni riscrivono la velocita'.
+        const bool customBaud = baudrate != 9600 && baudrate != 19200 && baudrate != 38400 &&
+                                baudrate != 57600 && baudrate != 115200 && baudrate != 230400;
+#endif
 
         // Set character size (8 bits) - with better error handling
         try {
@@ -67,9 +74,9 @@ namespace core {
             Logger::logWarning("[SerialPort] Failed to set parity: " + ec.message());
         }
 
-        // Set stop bits (1)
+        // Due bit di stop, come il firmware (8N2): danno a chi riceve una pausa a ogni byte
         serial_port_->set_option(boost::asio::serial_port_base::stop_bits(
-                boost::asio::serial_port_base::stop_bits::one), ec);
+                boost::asio::serial_port_base::stop_bits::two), ec);
         if (ec) {
             Logger::logWarning("[SerialPort] Failed to set stop bits: " + ec.message());
         }
@@ -81,6 +88,11 @@ namespace core {
         if (ec) {
             Logger::logWarning("[SerialPort] Failed to set flow control: " + ec.message());
         }
+#ifdef __linux__
+        if (customBaud && !setLinuxBaud(serial_port_->native_handle(), baudrate)) {
+            Logger::logError("[SerialPort] Cannot set " + std::to_string(baudrate) + " baud on this port");
+        }
+#endif
     }
 
     void RealSerialPort::triggerDeviceReset() {

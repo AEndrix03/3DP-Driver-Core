@@ -1,3 +1,4 @@
+#include "core/MoveFrame.hpp"
 #include "core/CommandExecutor.hpp"
 #include "logger/Logger.hpp"
 #include <chrono>
@@ -227,6 +228,22 @@ namespace core {
 
             lastActivity = std::chrono::steady_clock::now();
             if (startsWith(message.rawMessage, "BUSY")) continue; // il firmware lavora: non e' silenzio
+
+            // Conferma corta di un movimento: vale come "OK0 N<n> D<d>"
+            MoveFrame::Ack ack;
+            if (MoveFrame::decodeAck(message.rawMessage, ack)) {
+                for (const auto &move: pending_) {
+                    if ((move.number & 0x3F) != ack.sequence) continue;
+                    reply.kind = Reply::Kind::Terminal;
+                    reply.code = MessageCodeType::OK;
+                    reply.number = move.number;
+                    if (ack.lag != MoveFrame::ACK_LAG_UNKNOWN && ack.lag <= move.number) {
+                        reply.completed = move.number - ack.lag;
+                    }
+                    return reply;
+                }
+                continue; // di un movimento non piu' in volo (gia' confermato da uno successivo)
+            }
             if (message.type == MessageType::INVALID) {
                 Logger::logWarning("[CommandExecutor] Discarded line without valid checksum: " + message.rawMessage);
                 continue;
@@ -243,6 +260,11 @@ namespace core {
             reply.text = message.payload;
             return reply;
         }
+    }
+
+    void CommandExecutor::setReceiveBuffer(size_t bytes) {
+        if (bytes < 64) bytes = 64;
+        windowBytes_ = bytes - WINDOW_MARGIN;
     }
 
     void CommandExecutor::popFront() {
@@ -430,7 +452,7 @@ namespace core {
         }
 
         // Spazio nella finestra: prima si risolvono i piu' vecchi
-        while (pending_.size() >= WINDOW_FRAMES || pendingBytes_ + frame.size() > WINDOW_BYTES) {
+        while (pending_.size() >= WINDOW_FRAMES || pendingBytes_ + frame.size() > windowBytes_.load()) {
             const types::Result oldest = settleOldest();
             if (!oldest.isSuccess()) return oldest; // questo frame non e' stato inviato
         }

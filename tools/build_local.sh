@@ -18,6 +18,7 @@ sources=(
     src/core/CommandExecutor.cpp
     src/core/DriverInterface.cpp
     src/core/serial/handler/SerialProtocolHandler.cpp
+    src/core/serial/LinuxBaud.cpp
     src/core/command/CommandCategoryInterface.cpp
     src/core/command/endstop/EndstopCommands.cpp
     src/core/command/extruder/ExtruderCommands.cpp

@@ -82,6 +82,30 @@ namespace core {
             return frame;
         }
 
+        /// Conferma corta di un movimento accettato (vedi MoveFrame.hpp del firmware).
+        struct Ack {
+            uint8_t sequence = 0; ///< numero del comando modulo 64
+            uint8_t lag = 0;      ///< comandi ancora da completare; ACK_LAG_UNKNOWN = 63 o piu'
+        };
+
+        constexpr uint8_t ACK_LAG_UNKNOWN = 63;
+
+        /// @return true se `line` (senza fine riga) e' una conferma integra
+        inline bool decodeAck(const std::string &line, Ack &ack) {
+            if (line.size() != 4) return false;
+            for (const char c: line) {
+                if ((static_cast<uint8_t>(c) & 0xC0) != 0x80) return false;
+            }
+            uint16_t crc = crcUpdate(0xFFFF, static_cast<uint8_t>(line[0]));
+            crc = crcUpdate(crc, static_cast<uint8_t>(line[1]));
+            const uint16_t received = static_cast<uint16_t>(((static_cast<uint8_t>(line[2]) & 0x3F) << 6) |
+                                                            (static_cast<uint8_t>(line[3]) & 0x3F));
+            if ((crc & 0x0FFF) != received) return false;
+            ack.sequence = static_cast<uint8_t>(line[0]) & 0x3F;
+            ack.lag = static_cast<uint8_t>(line[1]) & 0x3F;
+            return true;
+        }
+
         /// Testo leggibile di un frame, per la traccia della seriale.
         inline std::string describe(const std::string &frame) {
             if (!isFrame(frame) || frame.size() < 4) return "<frame non valido>";

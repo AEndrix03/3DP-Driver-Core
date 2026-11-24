@@ -38,7 +38,7 @@ namespace connector::kafka {
 
         // Serial port configuration
         std::string serialPort = "${SERIAL_PORT:COM4}";
-        int serialBaudrate = 115200; // TODO: support int placeholders
+        int serialBaudrate = 250000; // 8N2, vedi core/serial/LinuxBaud.hpp // TODO: support int placeholders
 
         /**
          * @brief Resolve all placeholders with environment variables

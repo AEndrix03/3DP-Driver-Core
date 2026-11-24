@@ -1,4 +1,5 @@
 #include "local/NativeSerialPort.hpp"
+#include "core/serial/LinuxBaud.hpp"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -33,7 +34,7 @@ namespace local {
         dcb.BaudRate = baud;
         dcb.ByteSize = 8;
         dcb.Parity = NOPARITY;
-        dcb.StopBits = ONESTOPBIT;
+        dcb.StopBits = TWOSTOPBITS; // 8N2, come il firmware
         dcb.fBinary = TRUE;
         dcb.fParity = FALSE;
         dcb.fOutxCtsFlow = FALSE;
@@ -90,16 +91,6 @@ namespace local {
 
 #else
 
-    namespace {
-        speed_t speedFor(unsigned baud) {
-            switch (baud) {
-                case 57600: return B57600;
-                case 230400: return B230400;
-                default: return B115200;
-            }
-        }
-    }
-
     NativeSerialPort::NativeSerialPort(const std::string &device, unsigned baud) {
         fd_ = ::open(device.c_str(), O_RDWR | O_NOCTTY | O_CLOEXEC);
         if (fd_ < 0) {
@@ -114,14 +105,20 @@ namespace local {
             return;
         }
         cfmakeraw(&tty);
-        cfsetispeed(&tty, speedFor(baud));
-        cfsetospeed(&tty, speedFor(baud));
-        tty.c_cflag |= (CLOCAL | CREAD | HUPCL); // HUPCL: DTR basso alla chiusura
-        tty.c_cflag &= ~(CRTSCTS | CSTOPB | PARENB);
+        cfsetispeed(&tty, B115200); // provvisorio: il baud vero viene impostato sotto
+        cfsetospeed(&tty, B115200);
+        tty.c_cflag |= (CLOCAL | CREAD | HUPCL | CSTOPB); // HUPCL: DTR basso alla chiusura; CSTOPB: 2 bit di stop
+        tty.c_cflag &= ~(CRTSCTS | PARENB);
         tty.c_cc[VMIN] = 0;
         tty.c_cc[VTIME] = 0;
         if (tcsetattr(fd_, TCSANOW, &tty) != 0) {
             error_ = std::string("cannot configure port: ") + std::strerror(errno);
+            closePort();
+            return;
+        }
+        // 250000 non e' tra le costanti di termios: va chiesto come numero
+        if (!core::setLinuxBaud(fd_, baud)) {
+            error_ = "cannot set " + std::to_string(baud) + " baud: " + std::strerror(errno);
             closePort();
             return;
         }

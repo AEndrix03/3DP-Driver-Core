@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <atomic>
 #include "core/serial/SerialPort.hpp"
 #include "CommandContext.hpp"
 #include "types/Result.hpp"
@@ -52,10 +53,17 @@ namespace core {
          */
         types::Result sendCommandAndAwaitResponse(const std::string &command, uint32_t commandNumber);
 
-        /// Movimenti binari che possono essere in volo senza risposta.
-        static constexpr size_t WINDOW_FRAMES = 4;
-        /// Byte in volo: sotto il buffer di ricezione del firmware (64), con margine.
-        static constexpr size_t WINDOW_BYTES = 56;
+        /// Movimenti binari che possono essere in volo senza risposta. Non oltre 8: il firmware
+        /// riconosce come "gia' ricevuto" un frame rispedito solo entro 8 numeri dall'ultimo.
+        static constexpr size_t WINDOW_FRAMES = 8;
+        /// Margine lasciato libero nel buffer di ricezione del firmware.
+        static constexpr size_t WINDOW_MARGIN = 8;
+
+        /**
+         * @brief Dimensione del buffer di ricezione del firmware (da M115): i byte dei movimenti
+         * in volo non la superano mai. Finche' non e' nota vale quella minima (64).
+         */
+        void setReceiveBuffer(size_t bytes);
 
         /**
          * @brief Invia un movimento binario senza attendere la sua risposta.
@@ -109,6 +117,8 @@ namespace core {
             std::vector<std::string> body;
             std::string text;
         };
+
+        std::atomic<size_t> windowBytes_{64 - WINDOW_MARGIN};
 
         Reply nextReply(std::chrono::milliseconds silence);
 

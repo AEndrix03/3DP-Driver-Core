@@ -143,15 +143,27 @@ Il piano di velocita' si calcola qui, non sul firmware (`core::planning::MotionP
   cambia. Con K alto l'accelerazione dei tratti estrusi viene ridotta perche' il salto di
   velocita' dell'estrusore resti entro 5 mm/s. **K va tarato sulla macchina** (tipicamente
   0,03-0,1 con estrusore diretto, 0,3-0,8 con bowden): senza hotend non e' stato possibile.
+- Dalla versione locale K si imposta anche con `3dp advance <K>` o dalla pagina, e vale dai
+  movimenti successivi.
 - `M204 P<stampa> T<spostamento>` (o `S` per entrambe) limita l'accelerazione, mai oltre quella
   massima del firmware.
+
+### Porta seriale
+
+250000 baud, 8 bit, 2 bit di stop: e' l'unica velocita' alta che il quarzo della scheda genera
+esatta, e il secondo bit di stop da' margine all'adattatore USB (misure in `PROTOCOL.md` del
+firmware, "Velocita' della linea"). Su Linux 250000 si imposta con `termios2`
+(`src/core/serial/LinuxBaud.cpp`); questa parte e' compilata dalla CI ma non e' stata provata
+su una scheda collegata a Linux.
 
 ### Movimenti binari
 
 - I movimenti partono in formato binario, in step e gia' pianificati: la conversione da
   millimetri (con il resto frazionario dell'estrusore) avviene qui. Formato in
   `include/core/MoveFrame.hpp` e in `PROTOCOL.md` del firmware.
-- Fino a 4 movimenti (56 byte) restano in volo senza attendere la risposta
+- Fino a 8 movimenti restano in volo senza attendere la risposta, mai piu' byte di quanti ne
+  tiene il buffer di ricezione del firmware (letto con `M115`). Un movimento accettato viene
+  confermato con 5 byte invece di una riga di testo
   (`CommandExecutor::submitMove`). Un comando di testo attende sempre che siano stati tutti
   confermati.
 - Dopo un frame corrotto, perso o una risposta persa, i movimenti vengono rispediti dal primo
