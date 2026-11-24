@@ -120,19 +120,47 @@ Le API (`GET /api/status`, `GET /api/history`, `POST /api/<comando>?chiave=valor
 solo su `127.0.0.1` e non hanno autenticazione: muovono una macchina, non vanno esposte in rete.
 La porta seriale e' in `src/local/NativeSerialPort.cpp` (Win32 e termios, nessuna libreria).
 
+### Pianificazione dei movimenti e linear advance
+
+Il piano di velocita' si calcola qui, non sul firmware (`core::planning::MotionPlanner`,
+`include/core/motion/MotionPlanner.hpp`). La divisione dei compiti e' descritta in
+`PROTOCOL.md` del firmware ("Chi pianifica cosa"); in breve:
+
+- Per ogni segmento: velocita' nominale e accelerazione entro i limiti di ogni asse, velocita'
+  alle giunzioni, passate avanti e indietro. I limiti della macchina non sono copiati qui: si
+  leggono dal firmware con `M115` insieme alla posizione.
+- Un movimento di una stampa (`pipelined`) entra nel piano ed esce quando sono noti abbastanza
+  movimenti successivi; quelli ancora in attesa partono al primo comando non di movimento, a
+  fine job e quando la coda dei comandi resta vuota. Un movimento singolo (jog) e' pianificato
+  da solo, da fermo a fermo, e parte subito.
+- Il firmware resta l'ultima parola sulla sicurezza: si ferma comunque entro i blocchi che ha
+  in coda, parte sempre da fermo, rifiuta i movimenti fuori volume. Lo scenario e2e "stop within
+  queued moves" lo verifica con un host che dichiara velocita' impossibili e poi tace.
+- **Linear advance** (`M900 K<secondi>`, spento di default): l'estrusore viene tenuto "avanti"
+  di K volte la sua velocita', quindi spinge di piu' mentre si accelera e di meno mentre si
+  frena. Un segmento estruso lungo diventa tre blocchi (accelerazione, velocita' costante,
+  frenata), ognuno con il suo rapporto tra estrusore e percorso; il filamento totale non
+  cambia. Con K alto l'accelerazione dei tratti estrusi viene ridotta perche' il salto di
+  velocita' dell'estrusore resti entro 5 mm/s. **K va tarato sulla macchina** (tipicamente
+  0,03-0,1 con estrusore diretto, 0,3-0,8 con bowden): senza hotend non e' stato possibile.
+- `M204 P<stampa> T<spostamento>` (o `S` per entrambe) limita l'accelerazione, mai oltre quella
+  massima del firmware.
+
 ### Movimenti binari
 
-- I movimenti partono in formato binario, in step: la conversione da millimetri (con il resto
-  frazionario dell'estrusore) avviene qui. Formato in `include/core/MoveFrame.hpp` e in
-  `PROTOCOL.md` del firmware.
-- Durante una stampa fino a 4 movimenti restano in volo senza attendere la risposta
+- I movimenti partono in formato binario, in step e gia' pianificati: la conversione da
+  millimetri (con il resto frazionario dell'estrusore) avviene qui. Formato in
+  `include/core/MoveFrame.hpp` e in `PROTOCOL.md` del firmware.
+- Fino a 4 movimenti (56 byte) restano in volo senza attendere la risposta
   (`CommandExecutor::submitMove`). Un comando di testo attende sempre che siano stati tutti
   confermati.
 - Dopo un frame corrotto, perso o una risposta persa, i movimenti vengono rispediti dal primo
   che il firmware non ha accettato.
 - `MotionCommands` tiene una copia della posizione del firmware in step, riletta con `M115`
-  ogni volta che `DriverInterface::positionEpoch()` cambia.
-- Con `DRIVER_SERIAL_TRACE=1` i frame compaiono decodificati nella traccia (`MOVE #12 X16 Y-4 E1`).
+  ogni volta che `DriverInterface::positionEpoch()` cambia. Un movimento fuori dal volume di
+  lavoro viene rifiutato gia' qui, intero, prima di essere spezzato in blocchi.
+- Con `DRIVER_SERIAL_TRACE=1` i frame compaiono decodificati nella traccia
+  (`MOVE #12 X16 Y-4 E1 S80.000 J12.500`).
 
 ### Coda dei comandi e log
 

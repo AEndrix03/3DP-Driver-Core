@@ -16,9 +16,18 @@ namespace core {
  */
     namespace MoveFrame {
         constexpr int32_t NARROW_LIMIT = 2047;    ///< campo a 2 sestetti (12 bit con segno)
-        constexpr int32_t WIDE_LIMIT = 131071;    ///< campo a 3 sestetti (18 bit con segno)
-        constexpr uint32_t FEED_LIMIT = 262143;   ///< velocita', mm/min (18 bit)
-        constexpr size_t MAX_LENGTH = 19;
+        constexpr int32_t STEP_LIMIT = 32767;     ///< step massimi per asse in un movimento
+        constexpr uint32_t ENTRY_LIMIT = 4095;    ///< velocita' di ingresso, 1/4 mm/s (12 bit)
+        constexpr size_t MAX_LENGTH = 27;
+
+        /// Un movimento gia' pianificato, nelle unita' del firmware (vedi Planner.hpp del firmware).
+        struct PlannedMove {
+            int32_t steps[4] = {0, 0, 0, 0}; ///< X, Y, Z, E con segno, entro STEP_LIMIT
+            uint16_t nominalSpeed = 0;       ///< 1/64 mm/s
+            uint16_t acceleration = 0;       ///< mm/s^2
+            uint16_t stepScale = 0;          ///< step dell'asse dominante per mm, in 1/16
+            uint16_t entryQuarter = 0;       ///< velocita' massima di ingresso, 1/4 mm/s
+        };
 
         inline uint16_t crcUpdate(uint16_t crc, uint8_t data) {
             data ^= static_cast<uint8_t>(crc & 0xFF);
@@ -33,42 +42,43 @@ namespace core {
 
         /**
          * @param number numero del comando (ne viene trasmesso il modulo 64)
-         * @param delta step con segno per X, Y, Z, E (ognuno entro WIDE_LIMIT)
-         * @param feedrate mm/min; 0 = non inviata (resta l'ultima)
+         * @param withPlan true = include velocita' nominale e accelerazione; false = il firmware
+         *        riusa quelle del movimento precedente
          */
-        inline std::string encode(uint32_t number, const int32_t delta[4], uint32_t feedrate) {
+        inline std::string encode(uint32_t number, const PlannedMove &move, bool withPlan) {
             bool wide = false;
             uint8_t header = 0xC0;
             for (int axis = 0; axis < 4; ++axis) {
-                if (delta[axis] == 0) continue;
+                if (move.steps[axis] == 0) continue;
                 header |= static_cast<uint8_t>(0x08 >> axis);
-                if (std::abs(delta[axis]) > NARROW_LIMIT) wide = true;
+                if (std::abs(move.steps[axis]) > NARROW_LIMIT) wide = true;
             }
             if (wide) header |= 0x10;
-            if (feedrate > 0) header |= 0x20;
+            if (withPlan) header |= 0x20;
 
             std::string frame;
             frame.push_back(static_cast<char>(header));
             frame.push_back(static_cast<char>(0x80 | (number & 0x3F)));
 
-            const int sextets = wide ? 3 : 2;
-            for (int axis = 0; axis < 4; ++axis) {
-                if (delta[axis] == 0) continue;
-                const uint32_t value = static_cast<uint32_t>(delta[axis]); // complemento a due, troncato sotto
+            const auto put = [&frame](uint32_t value, int sextets) {
                 for (int i = sextets - 1; i >= 0; --i) {
                     frame.push_back(static_cast<char>(0x80 | ((value >> (6 * i)) & 0x3F)));
                 }
+            };
+            for (int axis = 0; axis < 4; ++axis) {
+                // complemento a due, troncato alla larghezza del campo
+                if (move.steps[axis] != 0) put(static_cast<uint32_t>(move.steps[axis]), wide ? 3 : 2);
             }
-            if (feedrate > 0) {
-                for (int i = 2; i >= 0; --i) {
-                    frame.push_back(static_cast<char>(0x80 | ((feedrate >> (6 * i)) & 0x3F)));
-                }
+            if (withPlan) {
+                put(move.nominalSpeed, 3);
+                put(move.acceleration, 3);
             }
+            put(move.stepScale, 3);
+            put(move.entryQuarter > ENTRY_LIMIT ? ENTRY_LIMIT : move.entryQuarter, 2);
 
             uint16_t crc = 0xFFFF;
             for (const char c: frame) crc = crcUpdate(crc, static_cast<uint8_t>(c));
-            frame.push_back(static_cast<char>(0x80 | ((crc >> 6) & 0x3F)));
-            frame.push_back(static_cast<char>(0x80 | (crc & 0x3F)));
+            put(crc & 0x0FFF, 2);
             return frame;
         }
 
@@ -89,11 +99,19 @@ namespace core {
                                                      : static_cast<int32_t>(value);
                 text += std::string(" ") + names[axis] + std::to_string(steps);
             }
-            if ((header & 0x20) && at + 3 <= frame.size()) {
-                uint32_t feed = 0;
-                for (int i = 0; i < 3; ++i) feed = (feed << 6) | (static_cast<uint8_t>(frame[at++]) & 0x3F);
-                text += " F" + std::to_string(feed);
+            const auto field = [&frame, &at](int sextets) {
+                uint32_t value = 0;
+                for (int i = 0; i < sextets && at < frame.size(); ++i) {
+                    value = (value << 6) | (static_cast<uint8_t>(frame[at++]) & 0x3F);
+                }
+                return value;
+            };
+            if (header & 0x20) {
+                text += " V" + std::to_string(field(3) / 64.0).substr(0, 6);
+                text += " A" + std::to_string(field(3));
             }
+            text += " S" + std::to_string(field(3) / 16.0).substr(0, 6);
+            text += " J" + std::to_string(field(2) / 4.0).substr(0, 6);
             return text + " (" + std::to_string(frame.size()) + " byte)";
         }
     }

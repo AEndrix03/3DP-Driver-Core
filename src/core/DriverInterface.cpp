@@ -219,11 +219,12 @@ namespace core {
     }
 
     void DriverInterface::flushMoves() const {
+        if (motion_) motion_->flushPlanned(); // prima del lock: invia passando da sendMove
         std::lock_guard<std::mutex> lock(commandMutex_);
         drainMovesLocked();
     }
 
-    types::Result DriverInterface::sendMove(const int32_t delta[4], uint32_t feedrate, bool pipelined) const {
+    types::Result DriverInterface::sendMove(const MoveFrame::PlannedMove &move, bool withPlan, bool pipelined) const {
         std::lock_guard<std::mutex> lock(commandMutex_);
 
         try {
@@ -235,7 +236,7 @@ namespace core {
             }
 
             const uint32_t cmdNum = commandContext_->nextCommandNumber();
-            const std::string frame = MoveFrame::encode(cmdNum, delta, feedrate);
+            const std::string frame = MoveFrame::encode(cmdNum, move, withPlan);
             types::Result result = commandExecutor_->submitMove(frame, cmdNum, !pipelined);
             if (const auto completed = commandExecutor_->lastWindowCompleted()) lastCompleted_ = *completed;
 
@@ -267,6 +268,8 @@ namespace core {
 
     types::Result
     DriverInterface::sendCommandInternal(char category, int code, const std::vector<std::string> &params) const {
+        // Un comando deve arrivare dopo i movimenti che lo precedono: quelli ancora nel piano partono ora
+        if (motion_) motion_->flushPlanned();
         std::lock_guard<std::mutex> lock(commandMutex_);
         // I comandi di testo sono uno alla volta: prima si chiudono i movimenti in volo
         drainMovesLocked();

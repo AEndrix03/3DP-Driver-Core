@@ -40,10 +40,11 @@ namespace core::command::motion {
     types::Result MotionCommands::syncMirror() {
         uint64_t epoch = 0;
         types::Result result;
-        bool gotFactors = false, gotPosition = false;
+        bool gotFactors = false, gotPosition = false, gotLimits = false, gotTravel = false;
+        planning::MachineLimits limits;
 
         // Se la risposta va persa il comando risulta "gia' eseguito" ma senza dati: si richiede.
-        for (int attempt = 0; attempt < 3 && !(gotFactors && gotPosition); ++attempt) {
+        for (int attempt = 0; attempt < 3 && !(gotFactors && gotPosition && gotLimits && gotTravel); ++attempt) {
             epoch = driver_->positionEpoch(); // letta prima: un evento durante la lettura la invalida
             result = sendCommand('M', 115, {});
             if (!result.isSuccess()) return result;
@@ -59,30 +60,111 @@ namespace core::command::motion {
                 } else if (token == "STP") {
                     gotPosition = static_cast<bool>(iss >> mirror_.position[0] >> mirror_.position[1]
                                                         >> mirror_.position[2]);
+                } else if (token == "TRV") {
+                    gotTravel = static_cast<bool>(iss >> mirror_.travelMax[0] >> mirror_.travelMax[1]
+                                                      >> mirror_.travelMax[2] >> mirror_.limitedAxes);
+                } else if (token == "LIM") {
+                    // velocita' massime (mm/min) X Y Z E, accelerazioni XY Z E, deviazione di giunzione
+                    // (micron), step/s massimi, blocchi utilizzabili della coda
+                    double feed[4], accelXY, accelZ, accelE, deviation, stepRate;
+                    int queue;
+                    if (iss >> feed[0] >> feed[1] >> feed[2] >> feed[3] >> accelXY >> accelZ >> accelE
+                            >> deviation >> stepRate >> queue) {
+                        for (int a = 0; a < 4; ++a) limits.maxFeed[a] = feed[a] / 60.0;
+                        limits.maxAcceleration[0] = limits.maxAcceleration[1] = accelXY;
+                        limits.maxAcceleration[2] = accelZ;
+                        limits.maxAcceleration[3] = accelE;
+                        limits.junctionDeviation = deviation / 1000.0;
+                        limits.maxStepRate = stepRate;
+                        limits.queueBlocks = queue;
+                        gotLimits = true;
+                    }
                 }
             }
         }
-        if (!gotFactors || !gotPosition) {
+        if (!gotFactors || !gotPosition || !gotLimits || !gotTravel) {
             result.code = types::ResultCode::Error;
-            result.message = "Firmware did not report step position";
+            result.message = "Firmware did not report step position and limits";
             return result;
         }
+        for (int a = 0; a < 4; ++a) {
+            if (mirror_.stepsPerMm[a] <= 0.0) {
+                result.code = types::ResultCode::Error;
+                result.message = "Firmware reported invalid steps per mm";
+                return result;
+            }
+            limits.stepsPerMm[a] = mirror_.stepsPerMm[a];
+        }
 
+        planner_.configure(limits); // scarta anche i movimenti in attesa: partivano da un'altra posizione
         mirror_.valid = true;
         mirror_.epoch = epoch;
         mirror_.eRemainder = 0.0;  // come il firmware dopo un arresto: si riparte senza resto
-        mirror_.lastFeedrate = 0.0; // la prossima velocita' viene sempre inviata
+        mirror_.sentSpeed = 0;     // il prossimo frame porta di nuovo velocita' e accelerazione
+        mirror_.sentAcceleration = 0;
         return result;
     }
 
+    types::Result MotionCommands::sendBlocks(const std::vector<planning::PlannedBlock> &blocks, bool pipelined) {
+        types::Result result;
+        result.code = types::ResultCode::Success;
+        result.message = "Planned";
+
+        for (size_t i = 0; i < blocks.size(); ++i) {
+            const MoveFrame::PlannedMove &block = blocks[i].move;
+            const bool withPlan = block.nominalSpeed != mirror_.sentSpeed ||
+                                  block.acceleration != mirror_.sentAcceleration;
+            // Solo l'ultimo blocco di un movimento non pipelined attende la risposta
+            result = driver_->sendMove(block, withPlan, pipelined || i + 1 < blocks.size());
+            if (!result.isSuccess()) {
+                mirror_.valid = false; // la posizione verra' riletta dal firmware
+                planner_.reset();
+                return result;
+            }
+            mirror_.sentSpeed = block.nominalSpeed;
+            mirror_.sentAcceleration = block.acceleration;
+        }
+        return result;
+    }
+
+    void MotionCommands::flushPlanned() {
+        std::lock_guard<std::recursive_mutex> lock(mirrorMutex_);
+        if (planner_.pending() == 0 || std::this_thread::get_id() != plannerThread_) return;
+        if (!mirror_.valid || mirror_.epoch != driver_->positionEpoch()) {
+            // Arresto o guasto nel frattempo: quei movimenti non vanno piu' eseguiti
+            planner_.reset();
+            return;
+        }
+        std::vector<planning::PlannedBlock> blocks;
+        planner_.flush(blocks);
+        sendBlocks(blocks, true); // un errore diventa un guasto quando la finestra viene chiusa
+    }
+
+    void MotionCommands::setLinearAdvance(double k) {
+        std::lock_guard<std::recursive_mutex> lock(mirrorMutex_);
+        planner_.setLinearAdvance(k);
+    }
+
+    double MotionCommands::linearAdvance() {
+        std::lock_guard<std::recursive_mutex> lock(mirrorMutex_);
+        return planner_.linearAdvance();
+    }
+
+    void MotionCommands::setAccelerations(double print, double travel) {
+        std::lock_guard<std::recursive_mutex> lock(mirrorMutex_);
+        planner_.setAccelerations(print, travel);
+    }
+
     types::Result MotionCommands::move(const MoveTarget &target, bool absolute, bool pipelined) {
-        std::lock_guard<std::mutex> lock(mirrorMutex_);
+        std::lock_guard<std::recursive_mutex> lock(mirrorMutex_);
 
         if (!mirror_.valid || mirror_.epoch != driver_->positionEpoch()) {
             mirror_.valid = false;
+            planner_.reset();
             const types::Result synced = syncMirror();
             if (!synced.isSuccess()) return synced;
         }
+        plannerThread_ = std::this_thread::get_id();
 
         long long delta[4] = {0, 0, 0, 0};
         const std::optional<double> axes[3] = {target.x, target.y, target.z};
@@ -91,52 +173,56 @@ namespace core::command::motion {
             const long long steps = std::llround(*axes[a] * mirror_.stepsPerMm[a]);
             delta[a] = absolute ? steps - mirror_.position[a] : steps;
         }
-        double remainder = mirror_.eRemainder;
+        // Limiti di corsa: stessa regola del firmware (un asse gia' fuori puo' sempre rientrare).
+        // Controllati qui sul movimento intero: una corsa lunga parte in piu' blocchi, e il
+        // firmware da solo ne rifiuterebbe soltanto l'ultimo.
+        for (int a = 0; a < 3; ++a) {
+            if (!(mirror_.limitedAxes & (1 << a)) || delta[a] == 0) continue;
+            const long long destination = mirror_.position[a] + delta[a];
+            if ((delta[a] < 0 && destination < 0) || (delta[a] > 0 && destination > mirror_.travelMax[a])) {
+                // I movimenti validi gia' nel piano vanno comunque eseguiti: ci si ferma sull'ultima
+                // posizione buona, come quando a rifiutare e' il firmware.
+                std::vector<planning::PlannedBlock> waiting;
+                planner_.flush(waiting);
+                sendBlocks(waiting, true);
+                return {types::ResultCode::Rejected, "Rejected: LIMIT (outside the travel volume)", std::nullopt, {}};
+            }
+        }
         if (target.e && *target.e != 0.0) {
             // E e' sempre relativo; il resto frazionario passa al movimento successivo (nessuna deriva)
             const double exact = *target.e * mirror_.stepsPerMm[3] + mirror_.eRemainder;
             delta[3] = std::llround(exact);
-            remainder = exact - static_cast<double>(delta[3]);
+            mirror_.eRemainder = exact - static_cast<double>(delta[3]);
         }
+        if (target.feedrate && *target.feedrate > 0.0) mirror_.lastFeedrate = *target.feedrate;
+        const double feedrate = mirror_.lastFeedrate > 0.0 ? mirror_.lastFeedrate : 1000.0;
 
-        uint32_t feedrate = 0;
-        if (target.feedrate && *target.feedrate > 0.0 && *target.feedrate != mirror_.lastFeedrate) {
-            feedrate = static_cast<uint32_t>(std::clamp(std::llround(*target.feedrate), 1LL,
-                                                        static_cast<long long>(MoveFrame::FEED_LIMIT)));
-        }
-
-        // Un movimento piu' lungo di un frame viene spezzato in parti uguali, sulla stessa retta
+        // Un movimento piu' lungo di un blocco viene spezzato in parti uguali, sulla stessa retta
         long long longest = 0;
         for (const long long d: delta) longest = std::max(longest, std::llabs(d));
-        const long long parts = std::max(1LL, (longest + MoveFrame::WIDE_LIMIT - 1) / MoveFrame::WIDE_LIMIT);
+        const long long parts = std::max(1LL, (longest + MoveFrame::STEP_LIMIT - 1) / MoveFrame::STEP_LIMIT);
 
-        types::Result result;
-        result.code = types::ResultCode::Success;
-        result.message = "Nothing to move";
-        if (longest == 0 && feedrate == 0) {
-            mirror_.eRemainder = remainder; // meno di mezzo step: si accumula per il prossimo
-            return result;
-        }
-
+        std::vector<planning::PlannedBlock> blocks;
         long long sent[4] = {0, 0, 0, 0};
-        for (long long part = 1; part <= parts; ++part) {
-            int32_t chunk[4];
+        for (long long part = 1; part <= parts && longest > 0; ++part) {
+            long long chunk[4];
             for (int a = 0; a < 4; ++a) {
                 const long long upTo = delta[a] * part / parts;
-                chunk[a] = static_cast<int32_t>(upTo - sent[a]);
+                chunk[a] = upTo - sent[a];
                 sent[a] = upTo;
             }
-            result = driver_->sendMove(chunk, part == 1 ? feedrate : 0, pipelined);
-            if (!result.isSuccess()) {
-                mirror_.valid = false; // la posizione verra' riletta dal firmware
-                return result;
-            }
+            planner_.push(chunk, feedrate, blocks);
         }
-
         for (int a = 0; a < 3; ++a) mirror_.position[a] += delta[a];
-        mirror_.eRemainder = remainder;
-        if (feedrate > 0) mirror_.lastFeedrate = *target.feedrate;
-        return result;
+        if (!pipelined) planner_.flush(blocks);
+
+        if (blocks.empty()) {
+            types::Result result;
+            result.code = types::ResultCode::Success;
+            result.message = longest == 0 ? "Nothing to move" : "Planned";
+            return result;
+        }
+        return sendBlocks(blocks, pipelined);
     }
 
     types::Result MotionCommands::setPosition(const MoveTarget &position) {

@@ -59,6 +59,7 @@ driver_sources=(
     src/core/command/fan/FanCommands.cpp
     src/core/command/history/HistoryCommands.cpp
     src/core/command/motion/MotionCommands.cpp
+    src/core/motion/MotionPlanner.cpp
     src/core/command/system/SystemCommands.cpp
     src/core/command/temperature/TemperatureCommands.cpp
     src/core/printer/job/tracking/JobTracker.cpp

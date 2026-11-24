@@ -13,6 +13,7 @@
 #include "core/command/fan/FanCommands.hpp"
 #include "core/command/system/SystemCommands.hpp"
 #include "core/CommandExecutor.hpp"
+#include "core/MoveFrame.hpp"
 #include "core/command/history/HistoryCommands.hpp"
 #include "core/command/temperature/TemperatureCommands.hpp"
 #include <memory>
@@ -85,17 +86,17 @@ namespace core {
         uint32_t sequenceEpoch() const { return sequenceEpoch_.load(); }
 
         /**
-         * @brief Invia un movimento in formato binario: step relativi gia' calcolati.
-         * @param delta step con segno per X, Y, Z, E
-         * @param feedrate mm/min, 0 = invariata
+         * @brief Invia un movimento in formato binario: step relativi e piano di velocita'
+         * gia' calcolati (vedi core::planning::MotionPlanner).
+         * @param withPlan true = il frame porta anche velocita' nominale e accelerazione
          * @param pipelined true = non attende la risposta (fino a 4 movimenti in volo);
          *        un errore viene restituito da una chiamata successiva o segnalato come
          *        guasto al primo comando di testo.
          */
-        types::Result sendMove(const int32_t delta[4], uint32_t feedrate, bool pipelined) const;
+        types::Result sendMove(const MoveFrame::PlannedMove &move, bool withPlan, bool pipelined) const;
 
         /**
-         * @brief Attende le risposte dei movimenti ancora in volo. Un errore diventa un guasto
+         * @brief Invia i movimenti ancora in attesa nel piano e attende le risposte di quelli in volo. Un errore diventa un guasto
          * (faultEpoch): da chiamare prima di considerare concluso un gruppo di movimenti.
          */
         void flushMoves() const;

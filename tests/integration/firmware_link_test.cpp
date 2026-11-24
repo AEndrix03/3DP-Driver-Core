@@ -10,6 +10,7 @@
 #include "SimBoard.hpp"
 
 #include "core/DriverInterface.hpp"
+#include "core/motion/MotionPlanner.hpp"
 #include "core/queue/CommandExecutorQueue.hpp"
 #include "core/utils/FloatFormatter.hpp"
 #include "logger/Logger.hpp"
@@ -696,7 +697,7 @@ static void testLookahead() {
     sim::recordIntervals(true);
     for (int i = 1; i <= 60; ++i) {
         const auto result = driver->motion()->moveAbsolute(
-                {static_cast<double>(i), std::nullopt, std::nullopt, std::nullopt, 3600.0});
+                {static_cast<double>(i), std::nullopt, std::nullopt, std::nullopt, 3600.0}, true);
         if (!result.isSuccess()) {
             CHECK_MSG(false, result.message);
             break;
@@ -739,8 +740,8 @@ static void testLookahead() {
         normalize();
         driver->system()->startPrint();
         sim::recordIntervals(true);
-        driver->motion()->moveAbsolute({30.0, 0.0, std::nullopt, std::nullopt, 3600.0});
-        driver->motion()->moveAbsolute({x2, y2, std::nullopt, std::nullopt, 3600.0});
+        driver->motion()->moveAbsolute({30.0, 0.0, std::nullopt, std::nullopt, 3600.0}, true);
+        driver->motion()->moveAbsolute({x2, y2, std::nullopt, std::nullopt, 3600.0}, true);
         idle();
         sim::recordIntervals(false);
         const auto r = recordedRates();
@@ -755,6 +756,192 @@ static void testLookahead() {
     CHECK_MSG(sharp < 900.0, "90 degree corner rate " + std::to_string(sharp));    // quasi fermo
     CHECK(gentle > sharp * 2.0);
     CHECK(sim::steps().x == 2400 && sim::steps().y == 2400);
+}
+
+// ---------------------------------------------------------------------------
+// Pianificatore lato host e linear advance (senza firmware: sola logica)
+// ---------------------------------------------------------------------------
+static void testHostPlanner() {
+    using core::planning::MotionPlanner;
+    using core::planning::PlannedBlock;
+    const core::planning::MachineLimits limits; // valori di default = MotionConfig.hpp del firmware
+
+    // --- cerchio di raggio 20 mm in segmenti da 0,2 mm a 60 mm/s ---
+    {
+        MotionPlanner planner;
+        planner.configure(limits);
+        std::vector<PlannedBlock> blocks;
+        const int segments = 628;
+        long long at[2] = {20 * 80, 0};
+        for (int i = 1; i <= segments; ++i) {
+            const double angle = 2.0 * 3.14159265358979323846 * i / segments;
+            const long long next[2] = {std::llround(20.0 * std::cos(angle) * 80.0),
+                                       std::llround(20.0 * std::sin(angle) * 80.0)};
+            const long long steps[4] = {next[0] - at[0], next[1] - at[1], 0, 0};
+            at[0] = next[0];
+            at[1] = next[1];
+            planner.push(steps, 3600.0, blocks);
+            // un segmento esce solo quando il suo piano e' definitivo: mai tutti subito
+            if (i == 5) CHECK(blocks.empty());
+        }
+        CHECK(planner.pending() > 0);
+        planner.flush(blocks);
+        CHECK(planner.pending() == 0);
+        CHECK(blocks.size() == static_cast<size_t>(segments));
+
+        bool continuous = true, physical = true;
+        double slowestMid = 1e9;
+        for (size_t i = 0; i < blocks.size(); ++i) {
+            const PlannedBlock &b = blocks[i];
+            if (i + 1 < blocks.size() && std::fabs(b.exit - blocks[i + 1].entry) > 1e-9) continuous = false;
+            // nessun cambio di velocita' oltre quello che l'accelerazione consente sulla lunghezza del blocco
+            const double room = 2.0 * 1000.0 * b.length * 1.02 + 0.3;
+            if (std::fabs(b.exit * b.exit - b.entry * b.entry) > room) physical = false;
+            if (b.entry > b.nominal + 1e-9 || b.exit > b.nominal + 0.26) physical = false;
+            if (i > blocks.size() / 3 && i < blocks.size() * 2 / 3) slowestMid = std::min(slowestMid, b.entry);
+        }
+        CHECK(continuous);
+        CHECK(physical);
+        CHECK(blocks.front().entry == 0.0 && blocks.back().exit == 0.0);
+        // in curva non ci si ferma a ogni segmento: la velocita' resta alta
+        CHECK_MSG(slowestMid > 40.0, "slowest mid-curve entry " + std::to_string(slowestMid));
+    }
+
+    // --- spigolo a 90 gradi: quasi fermo; proseguimento rettilineo: a velocita' piena ---
+    {
+        MotionPlanner planner;
+        planner.configure(limits);
+        std::vector<PlannedBlock> blocks;
+        const long long east[4] = {2400, 0, 0, 0}, north[4] = {0, 2400, 0, 0};
+        planner.push(east, 3600.0, blocks);
+        planner.push(east, 3600.0, blocks);
+        planner.push(north, 3600.0, blocks);
+        planner.flush(blocks);
+        CHECK(blocks.size() == 3);
+        if (blocks.size() == 3) {
+            CHECK_MSG(blocks[1].entry > 59.0, "straight junction " + std::to_string(blocks[1].entry));
+            CHECK_MSG(blocks[2].entry < 12.0 && blocks[2].entry > 1.0, "corner " + std::to_string(blocks[2].entry));
+        }
+    }
+
+    // --- linear advance: una linea estrusa di 50 mm ---
+    {
+        const long long line[4] = {4000, 0, 0, 160}; // 50 mm, 2 mm di filamento
+        std::vector<PlannedBlock> plain, advanced;
+
+        MotionPlanner planner;
+        planner.configure(limits);
+        planner.push(line, 3600.0, plain);
+        planner.flush(plain);
+        CHECK(plain.size() == 1); // senza linear advance resta un blocco solo
+
+        planner.setLinearAdvance(0.5);
+        planner.push(line, 3600.0, advanced);
+        planner.flush(advanced);
+        CHECK_MSG(advanced.size() == 3, "blocks " + std::to_string(advanced.size())); // accelera, costante, frena
+        if (advanced.size() == 3) {
+            long long x = 0, e = 0;
+            for (const auto &b: advanced) {
+                x += b.move.steps[0];
+                e += b.move.steps[3];
+            }
+            // la geometria e il filamento totale non cambiano: cambia solo quando viene spinto
+            CHECK(x == 4000);
+            CHECK_MSG(e == 160, "total E " + std::to_string(e));
+            const auto surplus = [](const PlannedBlock &b) {
+                return b.move.steps[3] - b.move.steps[0] * 160.0 / 4000.0;
+            };
+            // K * estrusione per mm * velocita' di crociera * step/mm, con l'accelerazione limitata dal salto ammesso
+            const double expected = 0.5 * (2.0 / 50.0) * advanced[1].entry * 80.0;
+            CHECK_MSG(std::fabs(surplus(advanced[0]) - expected) < 2.0,
+                      "accel surplus " + std::to_string(surplus(advanced[0])) + " expected " + std::to_string(expected));
+            CHECK_MSG(std::fabs(surplus(advanced[1])) < 1.0, "cruise surplus " + std::to_string(surplus(advanced[1])));
+            CHECK_MSG(std::fabs(surplus(advanced[2]) + expected) < 2.0, "decel surplus " + std::to_string(surplus(advanced[2])));
+            CHECK(advanced[0].exit > 30.0 && advanced[2].exit == 0.0);
+            // con K alto l'accelerazione viene ridotta: il salto di velocita' dell'estrusore resta entro 5 mm/s
+            CHECK(advanced[0].move.acceleration <= 250 && advanced[0].move.acceleration >= 200);
+        }
+
+        // uno spostamento senza estrusione non viene toccato
+        std::vector<PlannedBlock> travel;
+        const long long hop[4] = {4000, 0, 0, 0};
+        planner.push(hop, 6000.0, travel);
+        planner.flush(travel);
+        CHECK(travel.size() == 1 && travel[0].move.steps[3] == 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Il firmware deve potersi fermare entro i blocchi in coda, qualunque cosa dica l'host
+// ---------------------------------------------------------------------------
+static void testStopGuarantee() {
+    normalize();
+    CHECK(driver->system()->startPrint().isSuccess());
+
+    // Un host "bugiardo": 30 segmenti da 0,5 mm, ognuno dichiarato percorribile a 100 mm/s
+    // gia' dall'ingresso, e poi piu' niente (nessun segmento di frenata).
+    core::MoveFrame::PlannedMove move;
+    move.steps[0] = 40;
+    move.nominalSpeed = 100 * 64;
+    move.acceleration = 1000;
+    move.stepScale = 80 * 16;
+    move.entryQuarter = 100 * 4;
+
+    sim::recordIntervals(true);
+    bool sent = true;
+    for (int i = 0; i < 30 && sent; ++i) sent = driver->sendMove(move, i == 0, true).isSuccess();
+    CHECK(sent);
+    CHECK(idle());
+    sim::recordIntervals(false);
+    CHECK(sim::steps().x == 30 * 40); // nessuno step perso
+
+    const auto rates = recordedRates();
+    CHECK(rates.size() >= 1190);
+    if (rates.size() >= 1190) {
+        double fastest = 0.0, worst = 0.0;
+        for (const double r: rates) fastest = std::max(fastest, r);
+        // Finestre di 64 step: a 8000 step/s un tick di timer vale 32 step/s, e su finestre
+        // piu' corte la quantizzazione dell'intervallo pesa piu' dell'accelerazione misurata.
+        for (size_t i = 0; i + 64 < rates.size(); ++i) {
+            double dt = 0.0;
+            for (size_t k = i; k < i + 64; ++k) dt += 1.0 / rates[k];
+            worst = std::max(worst, std::fabs(rates[i + 64] - rates[i]) / dt);
+        }
+        // parte da fermo e arriva da fermo, sempre entro l'accelerazione (80000 step/s^2)
+        CHECK_MSG(rates.front() < 600.0, "first rate " + std::to_string(rates.front()));
+        CHECK_MSG(rates.back() < 600.0, "last rate " + std::to_string(rates.back()));
+        CHECK_MSG(worst < 80000.0 * 1.10, "peak acceleration (steps/s^2) " + std::to_string(worst));
+        CHECK_MSG(fastest > 6000.0 && fastest < 8010.0, "fastest rate " + std::to_string(fastest));
+    }
+
+    // Valori assurdi (velocita' e accelerazione fuori scala): il firmware li limita, non li esegue
+    normalize();
+    CHECK(driver->system()->startPrint().isSuccess());
+    move.nominalSpeed = 65535;
+    move.acceleration = 65535;
+    move.entryQuarter = 4095;
+    move.steps[0] = 2000;
+    sim::recordIntervals(true);
+    CHECK(driver->sendMove(move, true, false).isSuccess());
+    CHECK(idle());
+    sim::recordIntervals(false);
+    CHECK(sim::steps().x == 2000);
+    double fastest = 0.0;
+    for (const double r: recordedRates()) fastest = std::max(fastest, r);
+    CHECK_MSG(fastest <= 10010.0, "fastest rate " + std::to_string(fastest)); // MAX_STEP_RATE
+
+    // Un movimento senza piano dopo un riavvio (velocita' mai ricevute) viene rifiutato
+    // (lo scenario "recover after firmware reboot" verifica che il driver si riallinei da solo)
+    core::MoveFrame::PlannedMove wide;
+    wide.steps[2] = 40000; // oltre gli step ammessi in un blocco
+    wide.nominalSpeed = 64;
+    wide.acceleration = 100;
+    wide.stepScale = 400 * 16;
+    const auto refused = driver->sendMove(wide, true, false);
+    CHECK(refused.isRejected());
+    CHECK_MSG(refused.message.find("RANGE") != std::string::npos, refused.message);
+    CHECK(idle());
+    CHECK(sim::steps().z == 0);
 }
 
 static void testGeometry() {
@@ -1143,6 +1330,7 @@ static void testStreamFaults() {
     normalize();
     CHECK(driver->system()->startPrint().isSuccess());
     CHECK(streamSegments(20));
+    driver->flushMoves(); // i segmenti ancora trattenuti dal piano partono: da qui il conteggio e' esatto
     before = port->framesSent();
     port->dropNextFromFirmware("OK0", 1);
     CHECK(streamSegments(40));
@@ -1163,10 +1351,21 @@ static void testStreamFaults() {
     CHECK(driver->system()->startPrint().isSuccess());
     const auto home = sim::steps();
     const uint64_t faults = driver->faultEpoch();
-    CHECK(driver->motion()->moveAbsolute({10.0, 10.0, std::nullopt, std::nullopt, 6000.0}, true).isSuccess());
-    driver->motion()->moveAbsolute({300.0, 10.0, std::nullopt, std::nullopt, std::nullopt}, true); // fuori corsa
-    driver->motion()->moveAbsolute({20.0, 20.0, std::nullopt, std::nullopt, std::nullopt}, true);
-    driver->motion()->moveAbsolute({30.0, 30.0, std::nullopt, std::nullopt, std::nullopt}, true);
+    // Il driver rifiuta da se' un movimento fuori corsa: qui i frame partono direttamente,
+    // per verificare che il controllo del firmware resti l'ultima parola.
+    const auto frame = [](int x, int y) {
+        core::MoveFrame::PlannedMove move;
+        move.steps[0] = x;
+        move.steps[1] = y;
+        move.nominalSpeed = 100 * 64;
+        move.acceleration = 1000;
+        move.stepScale = 80 * 16;
+        return move;
+    };
+    CHECK(driver->sendMove(frame(700, 700), true, true).isSuccess()); // da 1,25 mm (dopo l'homing) a X10 Y10
+    driver->sendMove(frame(23200, 0), false, true); // X a 300 mm: fuori corsa
+    driver->sendMove(frame(800, 800), false, true);
+    driver->sendMove(frame(800, 800), false, true);
     // Il primo comando di testo chiude i movimenti in volo e scopre il rifiuto: e' un guasto,
     // quindi l'attesa si interrompe subito invece di far finta di niente.
     CHECK(!idle());
@@ -1640,6 +1839,8 @@ int main(int argc, char **argv) {
             {"command number beyond 16 bit",       testSequenceBeyond16Bit},
             {"motion abort",                       testAbortMotion},
             {"lookahead and speed profile",        testLookahead},
+            {"host planner and linear advance",    testHostPlanner},
+            {"stop within queued moves",           testStopGuarantee},
             {"thermal control and protections",    testThermal},
             {"PID temperature regulation",         testPidRegulation},
             {"18h / millis / micros rollover",     testLongRunningClocks},

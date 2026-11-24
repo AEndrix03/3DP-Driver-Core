@@ -95,6 +95,7 @@ namespace core {
         processingThreadId_ = std::this_thread::get_id();
 
         size_t executedCount = 0;
+        bool idleFlushed = true; // a coda vuota i movimenti trattenuti dal piano sono gia' partiti
         auto lastLogTime = std::chrono::steady_clock::now();
 
         try {
@@ -114,7 +115,14 @@ namespace core {
                     std::string brokenJob;
                     if (!takeNext(command, brokenJob)) {
                         if (brokenJob.empty()) {
-                            // coda vuota, oppure in pausa con soli comandi di job in attesa
+                            // coda vuota, oppure in pausa con soli comandi di job in attesa:
+                            // i movimenti che il piano tratteneva in attesa dei successivi partono ora
+                            if (!idleFlushed) {
+                                idleFlushed = true;
+                                lock.unlock();
+                                if (auto idleDriver = translator_->getDriver()) idleDriver->flushMoves();
+                                continue; // nel frattempo puo' essere arrivato un comando: si ricontrolla
+                            }
                             queueCondition_.wait_for(lock, std::chrono::milliseconds(500));
                             continue;
                         }
@@ -123,6 +131,7 @@ namespace core {
                         continue;
                     }
                     hasCommand = true;
+                    idleFlushed = false;
                 }
 
                 if (hasCommand) {

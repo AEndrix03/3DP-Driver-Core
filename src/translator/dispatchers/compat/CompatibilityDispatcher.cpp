@@ -11,7 +11,7 @@ namespace translator::gcode {
             : driver_(std::move(driver)) {}
 
     bool CompatibilityDispatcher::canHandle(const std::string &command) const {
-        if (command == "G4" || command == "M400") return true;
+        if (command == "G4" || command == "M400" || command == "M204" || command == "M900") return true;
         const Support support = classify(command).support;
         return support == Support::Ignored || support == Support::Fatal;
     }
@@ -34,6 +34,20 @@ namespace translator::gcode {
                     std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<long long>(milliseconds)));
                 }
             }
+            return;
+        }
+
+        // Parametri del piano di movimento: valgono dai movimenti successivi
+        if (command == "M900") {
+            if (params.count("K")) driver_->motion()->setLinearAdvance(params.at("K"));
+            return;
+        }
+        if (command == "M204") {
+            double print = 0.0, travel = 0.0;
+            if (params.count("S")) print = travel = params.at("S");
+            if (params.count("P")) print = params.at("P");
+            if (params.count("T")) travel = params.at("T");
+            driver_->motion()->setAccelerations(print, travel);
             return;
         }
 
