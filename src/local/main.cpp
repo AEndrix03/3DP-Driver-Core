@@ -252,6 +252,8 @@ namespace {
                 << ",\"elapsed\":" << (activeJob_.empty() ? 0 : static_cast<long long>(std::time(nullptr) - activeStart_))
                 << "}"
                 << ",\"linearAdvance\":" << driver_->motion()->linearAdvance()
+                << ",\"slicer\":{\"found\":" << (slicer_.binaryFound && slicer_.profileFound ? "true" : "false")
+                << ",\"path\":" << quote(slicer_.binary) << "}"
                 << ",\"sim\":" << (simulated_ ? "{\"speed\":" + number(local::simSpeed(), 2) + "}" : "null")
                 << ",\"volume\":{\"x\":" << settings_.number("volume_x") << ",\"y\":" << settings_.number("volume_y")
                 << ",\"z\":" << settings_.number("volume_z") << "}"
@@ -458,6 +460,7 @@ namespace {
         std::atomic<bool> running_{false};
 
         bool activeTest_ = false;
+        local::SlicerSetup slicer_;
         uint64_t jobResent_ = 0, jobErrors_ = 0, jobFrames_ = 0; ///< contatori del collegamento a inizio lavoro
         std::string activeJob_, activeName_, activePath_, faultText_, lastResult_;
         std::time_t activeStart_ = 0;
@@ -495,6 +498,11 @@ namespace {
 #else
                 setenv(variable, value.c_str(), 1);
 #endif
+            }
+            {
+                // dopo aver letto i percorsi della configurazione
+                std::lock_guard<std::mutex> lock(cacheMutex_);
+                slicer_ = local::locateSlicer();
             }
             if (!all) return;
 
@@ -722,7 +730,8 @@ namespace {
             const auto report = checkFile(sliced.gcodePath);
             return reply(report.printable(), report.printable() ? "sliced" : "sliced, but not printable",
                          "\"path\":" + quote(sliced.gcodePath) + ",\"source\":" + quote(it->second) +
-                         ",\"slicer\":" + quote(sliced.parameters) + ",\"report\":" + local::reportJson(report));
+                         ",\"slicer\":" + quote(sliced.parameters) + ",\"warning\":" + quote(sliced.warning) +
+                         ",\"report\":" + local::reportJson(report));
         }
 
         std::string print(const Params &params) {
@@ -917,6 +926,9 @@ namespace {
         });
         server.set_payload_max_length(512 * 1024 * 1024); // i G-code grandi arrivano dalla pagina
 
+        const auto slicer = local::locateSlicer();
+        std::cout << "3dp: slicer " << (slicer.binaryFound ? slicer.binary : "NOT FOUND (models cannot be sliced)")
+                  << (slicer.profileFound ? "" : ", machine profile NOT FOUND") << std::endl;
         std::cout << "3dp: " << (device.empty() ? "SIMULATED printer" : "printer on " + device) << ", page and API on http://127.0.0.1:" << httpPort << std::endl;
         // Solo localhost: l'API muove una macchina e non ha autenticazione
         const bool ok = server.listen("127.0.0.1", httpPort);

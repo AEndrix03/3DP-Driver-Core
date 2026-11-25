@@ -128,11 +128,11 @@ input[type=range] { accent-color:var(--accent); }
 .tele .meter { height:3px; background:var(--line); border-radius:3px; margin-top:5px; overflow:hidden; padding:0; border:0; }
 .tele .meter i { display:block; height:100%; width:0; background:var(--cool); transition:width .2s; }
 #wire { font:12px/1.5 var(--mono); height:230px; overflow:auto; background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:6px 0; }
-#wire div { display:grid; grid-template-columns:62px 22px 58px minmax(0, 1.1fr) minmax(0, 1fr); gap:8px; padding:0 10px; white-space:nowrap; }
+#wire div { display:grid; grid-template-columns:62px 18px 150px minmax(0, 1fr) minmax(0, 1.25fr); gap:8px; padding:0 10px; white-space:nowrap; }
 #wire div:hover { background:var(--raised); }
 #wire .t { color:var(--muted); text-align:right; }
 #wire .tx { color:var(--accent); } #wire .rx { color:var(--ok); }
-#wire .k { color:var(--muted); }
+#wire .k { font-weight:600; overflow:hidden; text-overflow:ellipsis; }
 #wire .hex { color:var(--muted); overflow:hidden; text-overflow:ellipsis; }
 #wire .txt { overflow:hidden; text-overflow:ellipsis; }
 #wire .err .txt { color:var(--danger); }
@@ -276,7 +276,7 @@ td.wide { white-space:normal; color:var(--muted); }
           <button class="btn small ghost" id="wPause" aria-pressed="false" onclick="wireFilter('pause')">ferma</button>
         </span></h2>
       <div id="wire" aria-live="off"></div>
-      <div class="locked">Ogni movimento parte come frame binario: a sinistra i byte, a destra la traduzione (step per asse, V velocit&agrave; in mm/s, A accelerazione, J velocit&agrave; d'ingresso). Le risposte <span class="num">ACK</span> dicono quanti movimenti restano da eseguire: &egrave; da l&igrave; che viene la posizione reale.</div>
+      <div class="locked">Per ogni scambio: il momento, il verso, che cosa fa (<span class="num">MOVE</span>, <span class="num">HOMING</span>, <span class="num">GET_TEMPERATURE</span>...), i byte e il contenuto. Ogni movimento parte come frame binario: al centro i byte, a destra la traduzione (step per asse, V velocit&agrave; in mm/s, A accelerazione, J velocit&agrave; d'ingresso). Le risposte <span class="num">ACK</span> dicono quanti movimenti restano da eseguire: &egrave; da l&igrave; che viene la posizione reale.</div>
     </div>
   </div>
 
@@ -317,6 +317,7 @@ td.wide { white-space:normal; color:var(--muted); }
         <label class="f"><span>Ugello &deg;C</span><input id="stemp" type="number" value="205"></label>
         <label class="f"><span>Supporti</span><select id="supports"><option value="0">no</option><option value="1">s&igrave;</option></select></label>
       </div>
+      <div id="slicerNote" class="note" hidden>Slicer non trovato: i modelli non si possono affettare (i G-code s&igrave;). Installa PrusaSlicer oppure indica il suo percorso in Configurazione, Slicer.</div>
       <div id="report">I parametri valgono per i modelli: vengono affettati con il profilo della macchina. Un G-code viene solo controllato.</div>
       <div class="row" style="margin-top:10px"><button class="btn primary" id="startBtn" style="flex:1" disabled onclick="startPrint()">Avvia stampa</button></div>
       <details><summary>File gi&agrave; sul computer</summary><div class="row">
@@ -507,12 +508,12 @@ function describe(report) {
   return text;
 }
 function setReport(text, bad) { $('report').textContent = text; $('report').className = bad ? 'bad' : ''; }
-async function prepare(path, name, extra) {
+async function prepare(path, name, extra, note) {
   if (!path) return;
   ready = null; $('startBtn').disabled = true;
   const checked = await api('check', 'file=' + encodeURIComponent(path));
   if (!checked) return;
-  setReport(checked.report ? describe(checked.report) : (checked.message || ''), !checked.ok);
+  setReport((checked.report ? describe(checked.report) : (checked.message || '')) + (note ? ' Lo slicer avverte: ' + note : ''), !checked.ok);
   show('control');
   await loadPreview(path, name);
   if (checked.ok) { ready = {path, name, extra}; $('startBtn').disabled = busy(); }
@@ -523,16 +524,16 @@ async function handleFile(file) {
   setReport('Caricamento di ' + file.name + '...');
   const uploaded = await api('upload', 'name=' + encodeURIComponent(file.name), {body: await file.arrayBuffer()});
   if (!uploaded || !uploaded.ok) { setReport('Caricamento non riuscito.', true); return; }
-  let path = uploaded.path, extra = '';
+  let path = uploaded.path, extra = '', warning = '';
   if (isModel) {
     setReport('Slicing in corso...');
     const sliced = await api('slice', 'file=' + encodeURIComponent(path) + '&layer=' + val('layer') + '&infill=' + val('infill')
       + '&temp=' + val('stemp') + '&supports=' + val('supports'));
     if (!sliced || !sliced.path) { setReport(sliced ? 'Slicing non riuscito: ' + sliced.message : 'Slicing non riuscito.', true); return; }
     extra = '&source=' + encodeURIComponent(sliced.source) + '&slicer=' + encodeURIComponent(sliced.slicer);
-    path = sliced.path;
+    path = sliced.path; warning = sliced.warning || '';
   }
-  prepare(path, file.name, extra);
+  prepare(path, file.name, extra, warning);
 }
 $('file').addEventListener('change', e => handleFile(e.target.files[0]));
 const drop = $('drop');
@@ -980,7 +981,7 @@ function renderWire() {
   box.innerHTML = wireRows.filter(r => r.gap || ((r.k === 'move' || r.k === 'ack' || r.k === 'resend') ? wireMoves : wireText)).map(r => r.gap
     ? '<span class="gap">… ' + it(r.gap) + ' scambi non mostrati (troppi per leggerli)</span>'
     : '<div class="' + (r.k === 'resend' || /ERR/.test(r.text) ? 'err' : '') + '"><span class="t">' + r.t.toFixed(3) + '</span><span class="' + (r.d === 'T' ? 'tx">→' : 'rx">←') + '</span><span class="k">'
-      + (KINDS[r.k] || r.k) + '</span><span class="hex">' + r.hex + '</span><span class="txt">' + esc(r.text) + '</span></div>').join('');
+      + esc(r.n || KINDS[r.k] || r.k) + '</span><span class="hex">' + r.hex + '</span><span class="txt">' + esc(r.text) + '</span></div>').join('');
   if (stick) box.scrollTop = box.scrollHeight;
 }
 async function pollLive() {
@@ -1037,6 +1038,7 @@ async function refresh() {
   $('modeName').textContent = mode === 'off' ? 'Scollegata' : MODES[mode][0] + (s.mode === 'sim' && active ? ' · lavoro in corso' : '');
   $('modeHint').textContent = mode === 'off' ? 'la scheda non risponde' : (s.state === 'Error' ? 'macchina in errore: premi Azzera errore' : MODES[mode][1]);
   $('simPill').hidden = !s.sim;
+  $('slicerNote').hidden = !s.slicer || s.slicer.found;
   if (s.sim && document.activeElement !== $('simSpeed')) $('simSpeed').value = s.sim.speed;
   if (firstStatus) { firstStatus = false; $('target').value = s.preheat; }
   for (const [id, label, value, suffix] of [['sp', 'spLabel', s.speedPercent, '%'], ['bps', 'bpsLabel', s.blocksPerSecond, '']]) {

@@ -57,6 +57,7 @@ namespace local {
             double seconds = 0.0;
             char direction = 'T'; ///< 'T' verso la scheda, 'R' dalla scheda
             const char *kind = "text";
+            std::string name;     ///< cosa fa: MOVE, HOMING, GET_TEMPERATURE, ACK, OK...
             std::string hex;      ///< solo per i dati binari
             std::string text;
         };
@@ -77,7 +78,8 @@ namespace local {
         Live counters_;
         std::vector<std::string> errorLines_;
 
-        void record(char direction, const char *kind, const std::string &hex, const std::string &text);
+        void record(char direction, const char *kind, const std::string &name, const std::string &hex,
+                    const std::string &text);
 
         void completedUpTo(uint32_t number);
     };
