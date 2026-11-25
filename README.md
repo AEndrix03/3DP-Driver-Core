@@ -77,7 +77,7 @@ tools/build_local.sh                       # servono solo g++ e SQLite (libsqlit
 build-local/3dp serve --port /dev/ttyUSB0  # su Windows: --port COM3
 ```
 
-Su Linux, dall'installazione dei pacchetti all'avvio automatico: [docs/LINUX.md](docs/LINUX.md).
+Su Linux, dall'installazione dei pacchetti all'avvio automatico: [LINUX.md](LINUX.md).
 Un indirizzo con `#tests`, `#config` o `#history` apre direttamente quella scheda.
 
 - **Servizio**: tiene la porta seriale, esegue le stampe, salva lo storico in
@@ -345,7 +345,7 @@ esatta, e il secondo bit di stop da' margine all'adattatore USB (misure in `PROT
 firmware, "Velocita' della linea"). Su Linux 250000 si imposta con `termios2`
 (`src/core/serial/LinuxBaud.cpp`); questa parte e' compilata dalla CI ma non e' stata provata
 su una scheda collegata a Linux. Permessi, regola udev e come isolare un problema di velocita':
-[docs/LINUX.md](docs/LINUX.md).
+[LINUX.md](LINUX.md).
 
 Su Windows, con le schede clone che montano un CH340 non originale: il driver WCH 3.8/3.9
 rifiuta la configurazione della porta (`cannot configure COMx (error 31)`); funziona il
