@@ -9,6 +9,13 @@ struct sqlite3;
 
 namespace local {
 
+/// Qualcosa accaduto durante una stampa: guasto, rifiuto del firmware, ritrasmissioni, pausa...
+    struct PrintEvent {
+        int64_t at = 0;      ///< secondi dall'epoca Unix
+        std::string level;   ///< "error", "warn" o "info"
+        std::string text;
+    };
+
 /// Una stampa nello storico locale.
     struct PrintRecord {
         int64_t id = 0;
@@ -22,6 +29,7 @@ namespace local {
         int64_t startedAt = 0;   ///< secondi dall'epoca Unix
         int64_t finishedAt = 0;
         int64_t lines = 0;
+        std::vector<PrintEvent> events; ///< in ordine di tempo (solo in lettura)
     };
 
 /**
@@ -40,6 +48,8 @@ namespace local {
         int64_t add(const PrintRecord &record);
 
         void finish(const std::string &jobId, const std::string &state, const std::string &error);
+
+        void addEvent(const std::string &jobId, const std::string &level, const std::string &text);
 
         /// Stampe rimaste "in corso" da un'esecuzione precedente del servizio.
         void closeStale(const std::string &state);

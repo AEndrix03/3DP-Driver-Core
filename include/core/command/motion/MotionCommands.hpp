@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <chrono>
 #include "core/command/CommandCategoryInterface.hpp"
 #include "./../../types/Result.hpp"
 #include "core/types/Position.hpp"
@@ -84,6 +85,43 @@ namespace core::command::motion {
 
         double linearAdvance();
 
+        /// Posizione (step) a cui porta l'ultimo movimento INVIATO al firmware: quella reale e' questa
+        /// meno i movimenti inviati e non ancora eseguiti.
+        struct SentPosition {
+            bool valid = false;
+            long long steps[3] = {0, 0, 0};
+            double stepsPerMm[4] = {0, 0, 0, 0};
+        };
+
+        SentPosition sentPosition();
+
+        /// Velocita' del lavoro (0.05 .. 1) e tetto ai movimenti inviati al secondo (0 = nessuno): vedi MotionPlanner.
+        void setSpeedFactor(double factor);
+
+        void setBlockRate(double perSecond);
+
+        /**
+         * @brief Limiti piu' bassi di quelli del firmware, scelti dall'operatore (0 = quello del firmware).
+         * Valgono dalla prossima lettura dei limiti: da fermi subito, in stampa al prossimo riallineamento.
+         */
+        void setLimitCaps(const planning::MachineLimits &caps);
+
+        /// Cio' che il firmware ha dichiarato con M115 (valid = false finche' non e' stato letto).
+        struct MachineInfo {
+            bool valid = false;
+            planning::MachineLimits limits;   ///< limiti del firmware, senza i tetti dell'operatore
+            double travelMm[3] = {0, 0, 0};
+            int receiveBuffer = 0;
+        };
+
+        MachineInfo machineInfo();
+
+        /// Legge subito dal firmware limiti e posizione (M115), senza attendere il primo movimento.
+        types::Result readMachine();
+
+        /// Limiti con cui il driver sta pianificando (quelli letti dal firmware, se gia' noti).
+        planning::MachineLimits plannerLimits();
+
         /// Accelerazioni richieste dal G-code (M204), mm/s^2; 0 = massimo della macchina.
         void setAccelerations(double print, double travel);
 
@@ -104,6 +142,12 @@ namespace core::command::motion {
 
         std::recursive_mutex mirrorMutex_;
         StepMirror mirror_;
+        planning::MachineLimits caps_;   ///< tetti dell'operatore: tutti 0 = nessuno
+        bool hasCaps_ = false;
+        MachineInfo info_;
+        std::chrono::steady_clock::time_point nextBlockAt_{};
+        std::mutex sentMutex_; ///< a parte: chi legge non deve attendere un movimento in corso
+        SentPosition sent_;
         planning::MotionPlanner planner_;
         std::thread::id plannerThread_;
 

@@ -24,6 +24,7 @@
 #include "translator/dispatchers/temperature/TemperatureDispatcher.hpp"
 #include "translator/dispatchers/compat/CompatibilityDispatcher.hpp"
 #include "translator/GCodeSupport.hpp"
+#include "translator/GCodePreview.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -1103,6 +1104,133 @@ static void testGCodeTranslation() {
     CHECK(driver->getState() == core::PrintState::Idle);
 }
 
+static void testPreviewAndEstimate() {
+    normalize();
+
+    // --- cio' che il firmware dichiara deve arrivare intero: una riga tagliata dava coda = 1 ---
+    CHECK(driver->system()->startPrint().isSuccess());
+    CHECK(driver->motion()->moveRelative({0.1, std::nullopt, std::nullopt, std::nullopt, 3000.0}).isSuccess());
+    CHECK(idle());
+    {
+        const auto info = driver->motion()->machineInfo();
+        CHECK(info.valid);
+        CHECK_MSG(info.limits.queueBlocks == 15, "queue " + std::to_string(info.limits.queueBlocks));
+        CHECK_MSG(info.receiveBuffer == 128, "rx " + std::to_string(info.receiveBuffer));
+        CHECK(info.limits.maxStepRate == 10000.0 && std::fabs(info.limits.junctionDeviation - 0.02) < 1e-9);
+        CHECK(std::fabs(info.travelMm[0] - 220.0) < 1e-6 && std::fabs(info.travelMm[2] - 200.0) < 1e-6);
+    }
+    normalize();
+    std::filesystem::create_directories("gcode");
+    const std::string path = "gcode/preview.gcode";
+    {
+        std::ofstream out(path);
+        out << "; percorso di prova\n"
+               "G90\n"
+               "G92 E0\n"
+               "G1 X40 Y0 F3000\n"
+               "G1 X40 Y40 E2\n"
+               "G2 X0 Y40 I-20 J0 E5 ; mezzo cerchio\n"
+               "\n"
+               "G1 X0 Y5 F6000\n";
+        // tratti corti a zig-zag: qui decide la regola di arresto, non la velocita' richiesta
+        for (int i = 1; i <= 60; ++i) {
+            out << "G1 X" << i * 0.5 << " Y" << (i % 2 ? 5.2 : 5.0) << " E" << 5.0 + i * 0.02 << " F2400\n";
+        }
+        out << "G1 E4 F1800 ; ritrazione\n"
+               "G1 X0 Y0 F6000\n";
+    }
+
+    // --- anteprima: stesso percorso che fara' il driver ---
+    const core::planning::MachineLimits limits; // default = MotionConfig.hpp del firmware
+    const auto preview = translator::gcode::buildPreview(path, limits, 0.0);
+    CHECK(preview.readable);
+    CHECK_MSG(preview.points.size() > 80, std::to_string(preview.points.size())); // l'arco e' spezzato in corde
+    const auto &last = preview.points.back();
+    CHECK(std::fabs(last.x) < 1e-3 && std::fabs(last.y) < 1e-3);
+    CHECK(preview.points[1].command == 3 && !preview.points[1].extruding); // "G1 X40 Y0" e' il terzo comando
+    CHECK(preview.points[2].extruding);
+    CHECK(last.command == 68 && !last.extruding); // 5 comandi, 60 tratti corti, ritrazione, rientro
+    bool ordered = true;
+    for (size_t i = 1; i < preview.points.size(); ++i) {
+        if (preview.points[i].seconds < preview.points[i - 1].seconds ||
+            preview.points[i].command < preview.points[i - 1].command) ordered = false;
+    }
+    CHECK(ordered);
+    CHECK(std::fabs(preview.points.back().seconds - preview.seconds()) < 1e-6);
+    CHECK(preview.heatWaits == 0 && preview.homings == 0);
+    // a velocita' costante sarebbero ~5,3 s: accelerazioni e tratti corti lo allungano
+    CHECK_MSG(preview.motionSeconds > 5.5 && preview.motionSeconds < 12.0, std::to_string(preview.motionSeconds));
+
+    // --- regolazioni dell'operatore: meta' velocita', poi un tetto ai movimenti al secondo ---
+    {
+        const auto half = translator::gcode::buildPreview(path, limits, 0.0, 0.5, 0.0);
+        CHECK_MSG(half.motionSeconds > preview.motionSeconds * 1.4 && half.motionSeconds < preview.motionSeconds * 2.1,
+                  std::to_string(half.motionSeconds));
+        // 10 movimenti al secondo: i 60 tratti corti da soli chiedono almeno 6 secondi
+        const auto capped = translator::gcode::buildPreview(path, limits, 0.0, 1.0, 10.0);
+        CHECK_MSG(capped.motionSeconds > preview.motionSeconds + 5.0, std::to_string(capped.motionSeconds));
+        CHECK(capped.points.size() == preview.points.size()); // stesso percorso, solo piu' lento
+
+        // lo stesso tetto, visto sul piano: nessun blocco dura meno di un decimo di secondo
+        core::planning::MotionPlanner planner;
+        planner.configure(limits);
+        planner.setBlockRate(10.0);
+        std::vector<core::planning::PlannedBlock> blocks;
+        for (int i = 0; i < 40; ++i) {
+            const long long steps[4] = {40, 0, 0, 0}; // 0,5 mm
+            planner.push(steps, 6000.0, blocks);
+        }
+        planner.flush(blocks);
+        CHECK(blocks.size() == 40);
+        bool slowEnough = true;
+        for (const auto &b: blocks) {
+            if (b.nominal > 0.5 * 10.0 + 1e-9) slowEnough = false; // 0,5 mm in almeno 0,1 s
+        }
+        CHECK(slowEnough);
+    }
+
+    // --- lo stesso file sulla macchina simulata: la durata decisa dal firmware ---
+    auto translator = std::make_shared<translator::gcode::GCodeTranslator>(driver);
+    translator->registerDispatcher(std::make_unique<MotionDispatcher>(driver));
+    translator->registerDispatcher(std::make_unique<translator::gcode::SystemDispatcher>(driver));
+
+    sim::recordIntervals(true);
+    {
+        std::ifstream in(path);
+        std::string line;
+        bool ok = true;
+        while (ok && std::getline(in, line)) {
+            if (line.empty() || line[0] == ';') continue;
+            try {
+                translator->parseLine(line);
+            } catch (const std::exception &e) {
+                ok = false;
+                CHECK_MSG(false, line + ": " + e.what());
+            }
+        }
+        driver->flushMoves();
+    }
+    CHECK(idle());
+    sim::recordIntervals(false);
+    double executed = 0.0;
+    for (const uint16_t ticks: sim::intervals()) executed += ticks * 0.5e-6;
+
+    CHECK_MSG(sim::steps().x == 0 && sim::steps().y == 0, "x=" + std::to_string(sim::steps().x));
+    CHECK_MSG(sim::steps().e == 4 * 80, "e=" + std::to_string(sim::steps().e));
+    // la stima deve stare entro il 5% di quanto il firmware ha davvero impiegato
+    CHECK_MSG(std::fabs(preview.motionSeconds - executed) < 0.05 * executed,
+              "estimated " + std::to_string(preview.motionSeconds) + " s, executed " + std::to_string(executed) + " s");
+    std::printf("    estimate %.3f s, firmware %.3f s\n", preview.motionSeconds, executed);
+
+    // --- filamento: i recuperi dopo una ritrazione non sono consumo ---
+    {
+        std::ofstream out("gcode/filament.gcode");
+        out << "G28\nG90\nG1 X10 E5 F1200\nG1 E4\nG1 E5\nG1 X20 E8\nG92 E0\nG1 X30 E2\n";
+    }
+    const auto report = translator::gcode::checkFile("gcode/filament.gcode", 220.0, 220.0, 200.0);
+    CHECK_MSG(std::fabs(report.filamentMm - 10.0) < 1e-6, std::to_string(report.filamentMm));
+}
+
 static void testQueueStopsOnFault() {
     normalize();
 
@@ -1117,7 +1245,9 @@ static void testQueueStopsOnFault() {
 
     // --- pausa: nessun comando viene inviato ne' perso ---
     std::vector<std::string> lines{"G90"};
-    for (int i = 1; i <= 30; ++i) lines.push_back("G1 X" + std::to_string(i) + " F6000");
+    // 80 righe: piu' di quante ne assorbono insieme il piano dell'host (10), i frame in volo (8)
+    // e la coda del firmware (15), altrimenti alla pausa la coda del driver sarebbe gia' vuota
+    for (int i = 1; i <= 80; ++i) lines.push_back("G1 X" + std::to_string(i) + " F6000");
     queue.enqueueCommands(lines, 3, "job-pause");
 
     CHECK(waitFor([&] { return sim::steps().x >= 400; }, 5s));
@@ -1131,7 +1261,7 @@ static void testQueueStopsOnFault() {
     queue.setPaused(false);
     CHECK(waitFor([&] { return finished.load() == 1; }, 10s));
     CHECK(idle());
-    CHECK(sim::steps().x == 2400); // tutti e 30 i movimenti eseguiti
+    CHECK(sim::steps().x == 6400); // tutti e 80 i movimenti eseguiti
     CHECK(faults.load() == 0);
 
     // --- guasto: la coda si svuota e il job fallisce, niente invii alla cieca ---
@@ -1859,6 +1989,7 @@ int main(int argc, char **argv) {
             {"18h / millis / micros rollover",     testLongRunningClocks},
             {"arc and spline flattening",          testGeometry},
             {"g-code translation",                 testGCodeTranslation},
+            {"preview and time estimate",          testPreviewAndEstimate},
             {"queue pause and stop on fault",      testQueueStopsOnFault},
             {"homing and endstops",                testHomingAndEndstops},
             {"full print job from file",           testFullPrintJob},

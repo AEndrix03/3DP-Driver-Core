@@ -35,6 +35,27 @@ namespace local {
              "started_at INTEGER NOT NULL,"
              "finished_at INTEGER NOT NULL DEFAULT 0,"
              "lines INTEGER NOT NULL DEFAULT 0)");
+        exec("CREATE TABLE IF NOT EXISTS events ("
+             "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+             "job_id TEXT NOT NULL,"
+             "at INTEGER NOT NULL,"
+             "level TEXT NOT NULL,"
+             "text TEXT NOT NULL)");
+        exec("CREATE INDEX IF NOT EXISTS events_job ON events (job_id)");
+    }
+
+    void History::addEvent(const std::string &jobId, const std::string &level, const std::string &text) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!db_ || jobId.empty()) return;
+        sqlite3_stmt *statement = nullptr;
+        if (sqlite3_prepare_v2(db_, "INSERT INTO events (job_id, at, level, text) VALUES (?, ?, ?, ?)", -1,
+                               &statement, nullptr) != SQLITE_OK) return;
+        bind(statement, 1, jobId);
+        sqlite3_bind_int64(statement, 2, static_cast<int64_t>(std::time(nullptr)));
+        bind(statement, 3, level);
+        bind(statement, 4, text);
+        sqlite3_step(statement);
+        sqlite3_finalize(statement);
     }
 
     History::~History() {
@@ -122,6 +143,21 @@ namespace local {
             records.push_back(std::move(r));
         }
         sqlite3_finalize(statement);
+
+        // gli eventi di ogni stampa (al piu' 60: una stampa andata male puo' averne moltissimi)
+        for (PrintRecord &r: records) {
+            if (sqlite3_prepare_v2(db_, "SELECT at, level, text FROM events WHERE job_id = ? ORDER BY id LIMIT 60", -1,
+                                   &statement, nullptr) != SQLITE_OK) break;
+            bind(statement, 1, r.jobId);
+            while (sqlite3_step(statement) == SQLITE_ROW) {
+                PrintEvent e;
+                e.at = sqlite3_column_int64(statement, 0);
+                e.level = column(statement, 1);
+                e.text = column(statement, 2);
+                r.events.push_back(std::move(e));
+            }
+            sqlite3_finalize(statement);
+        }
         return records;
     }
 } // namespace local

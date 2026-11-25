@@ -5,12 +5,22 @@
 # niente Boost, Kafka, curl o vcpkg.
 #
 #   tools/build_local.sh          -> build-local/3dp
+#   tools/build_local.sh --sim    -> lo stesso, con dentro la stampante simulata (3dp serve --sim):
+#                                    compila anche il firmware per il PC, quindi serve il repo
+#                                    3D-Printer-Firmware accanto a questo (o FIRMWARE_DIR=...)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="${BUILD_DIR:-$ROOT/build-local}"
 CXX="${CXX:-g++}"
-mkdir -p "$BUILD/obj"
+SIM=""
+[ "${1:-}" = "--sim" ] && SIM=1
+FIRMWARE_DIR="${FIRMWARE_DIR:-$ROOT/../3D-Printer-Firmware}"
+if [ -n "$SIM" ] && [ ! -f "$FIRMWARE_DIR/test/native/SimBoard.cpp" ]; then
+    echo "firmware repo not found at: $FIRMWARE_DIR (set FIRMWARE_DIR)" >&2
+    exit 2
+fi
+mkdir -p "$BUILD/obj" "$BUILD/fw"
 
 sources=(
     src/core/CommandBuilder.cpp
@@ -40,9 +50,13 @@ sources=(
     src/translator/dispatchers/temperature/TemperatureDispatcher.cpp
     src/translator/dispatchers/compat/CompatibilityDispatcher.cpp
     src/translator/GCodeSupport.cpp
+    src/translator/GCodePreview.cpp
     src/translator/dispatchers/extruder/ExtruderDispatcher.cpp
     src/translator/dispatchers/endstop/EndstopDispatcher.cpp
     src/local/Slicer.cpp
+    src/local/SimPort.cpp
+    src/local/WirePort.cpp
+    src/local/Settings.cpp
     src/logger/Logger.cpp
     src/local/NativeSerialPort.cpp
     src/local/History.cpp
@@ -60,12 +74,36 @@ fi
 objects=()
 for rel in "${sources[@]}"; do
     obj="$BUILD/obj/$(echo "$rel" | tr '/' '_').o"
+    extra=()
+    if [ "$rel" = "src/local/SimPort.cpp" ] && [ -n "$SIM" ]; then
+        obj="${obj%.o}.sim.o"
+        extra=(-DTHREEDP_SIM -I"$FIRMWARE_DIR/test/native")
+    fi
     objects+=("$obj")
     if [ ! -f "$obj" ] || [ "$ROOT/$rel" -nt "$obj" ]; then
         echo "  CXX $rel"
-        "$CXX" -std=c++17 -O2 -Wall -Wextra -I"$ROOT/include" -I"$ROOT/src/local" -c "$ROOT/$rel" -o "$obj"
+        "$CXX" -std=c++17 -O2 -Wall -Wextra -I"$ROOT/include" -I"$ROOT/src/local" "${extra[@]}" -c "$ROOT/$rel" -o "$obj"
     fi
 done
+
+# Stampante simulata: il firmware vero con la scheda finta dei test (stesse opzioni di tests/integration/run.sh)
+if [ -n "$SIM" ]; then
+    fw_stamp="$BUILD/fw/.headers"
+    fw_newest="$(find "$FIRMWARE_DIR/src" "$FIRMWARE_DIR/test/native" -name '*.h*' -newer "$fw_stamp" 2>/dev/null | head -n 1 || true)"
+    if [ ! -f "$fw_stamp" ] || [ -n "$fw_newest" ]; then
+        rm -f "$BUILD"/fw/*.o
+        touch "$fw_stamp"
+    fi
+    while IFS= read -r src; do
+        obj="$BUILD/fw/$(echo "${src#$FIRMWARE_DIR/}" | tr '/' '_').o"
+        objects+=("$obj")
+        if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ]; then
+            echo "  FW  ${src#$FIRMWARE_DIR/}"
+            "$CXX" -std=c++17 -O2 -DPLATFORM_NATIVE -DSIM_ENDSTOPS -Dposition=fw_position \
+                -I"$FIRMWARE_DIR/test/native" -c "$src" -o "$obj"
+        fi
+    done < <(find "$FIRMWARE_DIR/src" "$FIRMWARE_DIR/test/native" -name '*.cpp' | sort)
+fi
 
 link=(-lsqlite3 -pthread)
 case "$(uname -s)" in

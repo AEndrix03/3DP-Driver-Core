@@ -12,3 +12,5 @@ temp/
 checkpoints/
 build-local/
 3dp-data/
+build-preview/
+3dp-data-sim/

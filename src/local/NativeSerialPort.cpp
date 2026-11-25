@@ -20,7 +20,9 @@ namespace local {
         const std::string path = "\\\\.\\" + device;
         HANDLE h = CreateFileA(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
         if (h == INVALID_HANDLE_VALUE) {
-            error_ = "cannot open " + device + " (error " + std::to_string(GetLastError()) + ")";
+            const DWORD code = GetLastError();
+            error_ = "cannot open " + device + " (error " + std::to_string(code) + ")";
+            if (code == ERROR_ACCESS_DENIED) error_ += ": the port is in use by another program";
             return;
         }
 
@@ -44,7 +46,13 @@ namespace local {
         dcb.fOutX = FALSE;
         dcb.fInX = FALSE;
         if (!SetCommState(h, &dcb)) {
-            error_ = "cannot configure " + device + " (error " + std::to_string(GetLastError()) + ")";
+            const DWORD code = GetLastError();
+            error_ = "cannot configure " + device + " (error " + std::to_string(code) + ")";
+            if (code == ERROR_GEN_FAILURE) {
+                // Visto con i cloni CH340 e il driver WCH 3.8/3.9: funziona il 3.5 (vedi README)
+                error_ += ": the USB serial driver refused the port settings; on CH340 clones this is the "
+                          "WCH driver 3.8/3.9, install 3.5.2019.1";
+            }
             CloseHandle(h);
             return;
         }

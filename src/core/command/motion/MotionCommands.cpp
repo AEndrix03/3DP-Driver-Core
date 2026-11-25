@@ -3,6 +3,8 @@
 #include "core/utils/FloatFormatter.hpp"
 #include "core/MoveFrame.hpp"
 #include <sstream>
+#include <thread>
+#include <chrono>
 #include <cmath>
 #include <algorithm>
 
@@ -40,11 +42,12 @@ namespace core::command::motion {
     types::Result MotionCommands::syncMirror() {
         uint64_t epoch = 0;
         types::Result result;
-        bool gotFactors = false, gotPosition = false, gotLimits = false, gotTravel = false;
+        bool gotFactors = false, gotPosition = false, gotLimits = false, gotTravel = false, gotQueue = false;
         planning::MachineLimits limits;
+        int queueBlocks = limits.queueBlocks;
 
         // Se la risposta va persa il comando risulta "gia' eseguito" ma senza dati: si richiede.
-        for (int attempt = 0; attempt < 3 && !(gotFactors && gotPosition && gotLimits && gotTravel); ++attempt) {
+        for (int attempt = 0; attempt < 3 && !(gotFactors && gotPosition && gotLimits && gotTravel && gotQueue); ++attempt) {
             epoch = driver_->positionEpoch(); // letta prima: un evento durante la lettura la invalida
             result = sendCommand('M', 115, {});
             if (!result.isSuccess()) return result;
@@ -65,26 +68,33 @@ namespace core::command::motion {
                                                       >> mirror_.travelMax[2] >> mirror_.limitedAxes);
                 } else if (token == "LIM") {
                     // velocita' massime (mm/min) X Y Z E, accelerazioni XY Z E, deviazione di giunzione
-                    // (micron), step/s massimi, blocchi utilizzabili della coda, buffer di ricezione (byte)
+                    // (micron), step/s massimi
                     double feed[4], accelXY, accelZ, accelE, deviation, stepRate;
-                    int queue, receiveBuffer = 64;
-                    if (iss >> feed[0] >> feed[1] >> feed[2] >> feed[3] >> accelXY >> accelZ >> accelE
-                            >> deviation >> stepRate >> queue) {
+                    if (line.find('~') == std::string::npos &&
+                        (iss >> feed[0] >> feed[1] >> feed[2] >> feed[3] >> accelXY >> accelZ >> accelE
+                             >> deviation >> stepRate)) {
                         for (int a = 0; a < 4; ++a) limits.maxFeed[a] = feed[a] / 60.0;
                         limits.maxAcceleration[0] = limits.maxAcceleration[1] = accelXY;
                         limits.maxAcceleration[2] = accelZ;
                         limits.maxAcceleration[3] = accelE;
                         limits.junctionDeviation = deviation / 1000.0;
                         limits.maxStepRate = stepRate;
-                        limits.queueBlocks = queue;
-                        iss >> receiveBuffer;
-                        driver_->executor()->setReceiveBuffer(static_cast<size_t>(receiveBuffer));
                         gotLimits = true;
+                    }
+                } else if (token == "QUE") {
+                    // blocchi utilizzabili della coda, buffer di ricezione (byte)
+                    int queue = 0, receiveBuffer = 0;
+                    if ((iss >> queue >> receiveBuffer) && queue >= 2 && receiveBuffer >= 32) {
+                        queueBlocks = queue;
+                        driver_->executor()->setReceiveBuffer(static_cast<size_t>(receiveBuffer));
+                        info_.receiveBuffer = receiveBuffer;
+                        gotQueue = true;
                     }
                 }
             }
         }
-        if (!gotFactors || !gotPosition || !gotLimits || !gotTravel) {
+        limits.queueBlocks = queueBlocks;
+        if (!gotFactors || !gotPosition || !gotLimits || !gotTravel || !gotQueue) {
             result.code = types::ResultCode::Error;
             result.message = "Firmware did not report step position and limits";
             return result;
@@ -98,12 +108,36 @@ namespace core::command::motion {
             limits.stepsPerMm[a] = mirror_.stepsPerMm[a];
         }
 
+        {
+            std::lock_guard<std::mutex> sentLock(sentMutex_);
+            info_.valid = true;
+            info_.limits = limits;
+            for (int a = 0; a < 3; ++a) info_.travelMm[a] = static_cast<double>(mirror_.travelMax[a]) / mirror_.stepsPerMm[a];
+        }
+        if (hasCaps_) {
+            // i tetti dell'operatore possono solo abbassare: oltre i valori del firmware non si va
+            for (int a = 0; a < 4; ++a) {
+                if (caps_.maxFeed[a] > 0.0) limits.maxFeed[a] = std::min(limits.maxFeed[a], caps_.maxFeed[a]);
+                if (caps_.maxAcceleration[a] > 0.0) {
+                    limits.maxAcceleration[a] = std::min(limits.maxAcceleration[a], caps_.maxAcceleration[a]);
+                }
+            }
+            if (caps_.junctionDeviation > 0.0) {
+                limits.junctionDeviation = std::min(limits.junctionDeviation, caps_.junctionDeviation);
+            }
+        }
         planner_.configure(limits); // scarta anche i movimenti in attesa: partivano da un'altra posizione
         mirror_.valid = true;
         mirror_.epoch = epoch;
         mirror_.eRemainder = 0.0;  // come il firmware dopo un arresto: si riparte senza resto
         mirror_.sentSpeed = 0;     // il prossimo frame porta di nuovo velocita' e accelerazione
         mirror_.sentAcceleration = 0;
+        {
+            std::lock_guard<std::mutex> sentLock(sentMutex_);
+            sent_.valid = true;
+            for (int a = 0; a < 3; ++a) sent_.steps[a] = mirror_.position[a];
+            for (int a = 0; a < 4; ++a) sent_.stepsPerMm[a] = mirror_.stepsPerMm[a];
+        }
         return result;
     }
 
@@ -116,12 +150,25 @@ namespace core::command::motion {
             const MoveFrame::PlannedMove &block = blocks[i].move;
             const bool withPlan = block.nominalSpeed != mirror_.sentSpeed ||
                                   block.acceleration != mirror_.sentAcceleration;
+            if (planner_.blockRate() > 0.0) {
+                // tetto ai movimenti al secondo: il piano ne ha gia' tenuto conto, qui lo si fa rispettare
+                const auto now = std::chrono::steady_clock::now();
+                if (nextBlockAt_ > now) std::this_thread::sleep_until(nextBlockAt_);
+                nextBlockAt_ = std::max(nextBlockAt_, now) +
+                               std::chrono::microseconds(static_cast<long long>(1e6 / planner_.blockRate()));
+            }
             // Solo l'ultimo blocco di un movimento non pipelined attende la risposta
             result = driver_->sendMove(block, withPlan, pipelined || i + 1 < blocks.size());
             if (!result.isSuccess()) {
                 mirror_.valid = false; // la posizione verra' riletta dal firmware
                 planner_.reset();
+                std::lock_guard<std::mutex> sentLock(sentMutex_);
+                sent_.valid = false;
                 return result;
+            }
+            {
+                std::lock_guard<std::mutex> sentLock(sentMutex_);
+                for (int a = 0; a < 3; ++a) sent_.steps[a] += block.steps[a];
             }
             mirror_.sentSpeed = block.nominalSpeed;
             mirror_.sentAcceleration = block.acceleration;
@@ -150,6 +197,46 @@ namespace core::command::motion {
     double MotionCommands::linearAdvance() {
         std::lock_guard<std::recursive_mutex> lock(mirrorMutex_);
         return planner_.linearAdvance();
+    }
+
+    void MotionCommands::setSpeedFactor(double factor) {
+        std::lock_guard<std::recursive_mutex> lock(mirrorMutex_);
+        planner_.setSpeedFactor(factor);
+    }
+
+    void MotionCommands::setBlockRate(double perSecond) {
+        std::lock_guard<std::recursive_mutex> lock(mirrorMutex_);
+        planner_.setBlockRate(perSecond);
+    }
+
+    void MotionCommands::setLimitCaps(const planning::MachineLimits &caps) {
+        std::lock_guard<std::recursive_mutex> lock(mirrorMutex_);
+        caps_ = caps;
+        hasCaps_ = true;
+        // Da fermi (niente in attesa nel piano) i limiti si rileggono al prossimo movimento
+        if (planner_.pending() == 0) mirror_.valid = false;
+    }
+
+    types::Result MotionCommands::readMachine() {
+        std::lock_guard<std::recursive_mutex> lock(mirrorMutex_);
+        mirror_.valid = false;
+        planner_.reset();
+        return syncMirror();
+    }
+
+    MotionCommands::MachineInfo MotionCommands::machineInfo() {
+        std::lock_guard<std::mutex> sentLock(sentMutex_);
+        return info_;
+    }
+
+    MotionCommands::SentPosition MotionCommands::sentPosition() {
+        std::lock_guard<std::mutex> sentLock(sentMutex_);
+        return sent_;
+    }
+
+    planning::MachineLimits MotionCommands::plannerLimits() {
+        std::lock_guard<std::recursive_mutex> lock(mirrorMutex_);
+        return planner_.limits();
     }
 
     void MotionCommands::setAccelerations(double print, double travel) {

@@ -24,6 +24,12 @@ namespace core::planning {
         double exit = 0.0;
         double nominal = 0.0;
         double length = 0.0;
+        double acceleration = 0.0; ///< mm/s^2 in accelerazione
+        double deceleration = 0.0; ///< mm/s^2 in frenata (quella del piano, un po' piu' bassa)
+        uint32_t tag = 0;          ///< etichetta data a push(): da quale movimento viene il blocco
+
+        /// Durata prevista del blocco (s), con il profilo a trapezio che esegue il firmware.
+        double seconds() const;
     };
 
     /**
@@ -60,12 +66,32 @@ namespace core::planning {
         void setAccelerations(double print, double travel);
 
         /**
+         * @brief Rallenta tutto il lavoro: le velocita' chieste dal G-code vengono moltiplicate
+         * per `factor` (0.05 .. 1). Vale dai segmenti successivi.
+         */
+        void setSpeedFactor(double factor) { speedFactor_ = factor < 0.05 ? 0.05 : factor > 1.0 ? 1.0 : factor; }
+
+        double speedFactor() const { return speedFactor_; }
+
+        /**
+         * @brief Tetto ai blocchi inviati al secondo (0 = nessuno).
+         *
+         * Il piano ne tiene conto: un segmento non viene percorso in meno del tempo che serve a
+         * inviarlo, cosi' con un tetto basso la macchina va piu' piano in modo regolare invece di
+         * svuotare la coda del firmware e procedere a strappi.
+         */
+        void setBlockRate(double perSecond) { blockRate_ = perSecond > 0.0 ? perSecond : 0.0; }
+
+        double blockRate() const { return blockRate_; }
+
+        /**
          * @brief Aggiunge un segmento.
          * @param steps step con segno X, Y, Z, E (ognuno entro MoveFrame::STEP_LIMIT)
          * @param feedMmMin velocita' richiesta lungo il percorso
          * @param out riceve i blocchi diventati definitivi
+         * @param tag etichetta riportata sui blocchi che nascono da questo segmento
          */
-        void push(const long long steps[4], double feedMmMin, std::vector<PlannedBlock> &out);
+        void push(const long long steps[4], double feedMmMin, std::vector<PlannedBlock> &out, uint32_t tag = 0);
 
         /// Chiude il piano con un arresto: escono tutti i segmenti in attesa.
         void flush(std::vector<PlannedBlock> &out);
@@ -77,6 +103,7 @@ namespace core::planning {
 
     private:
         struct Segment {
+            uint32_t tag = 0;
             long long steps[4] = {0, 0, 0, 0};
             double unit[3] = {0, 0, 0};
             bool cartesian = false; ///< muove X, Y o Z
@@ -99,6 +126,8 @@ namespace core::planning {
         double advanceK_ = 0.0;
         double printAcceleration_ = 0.0;
         double travelAcceleration_ = 0.0;
+        double speedFactor_ = 1.0;
+        double blockRate_ = 0.0;
 
         double advance_ = 0.0;          ///< filamento attualmente "in anticipo" (mm)
         double advanceRemainder_ = 0.0; ///< frazione di step di anticipo non ancora inviata

@@ -35,6 +35,25 @@ jobs:
           path: 3D-Printer-Firmware
       - name: Run end-to-end tests
         run: bash 3DP-Driver-Core/tests/integration/run.sh 3D-Printer-Firmware
+      # "3dp serve --sim": il servizio locale con dentro il firmware compilato per il PC
+      - name: Build the local service with the simulated printer
+        run: |
+          sudo apt-get update && sudo apt-get install -y libsqlite3-dev
+          bash 3DP-Driver-Core/tools/build_local.sh --sim
+      - name: Simulated printer smoke test
+        working-directory: 3DP-Driver-Core
+        run: |
+          ./build-local/3dp serve --sim --speed 4 --http 7444 &
+          ok=""
+          for i in $(seq 1 20); do
+            if ./build-local/3dp status --http 7444 > status.json; then ok=1; break; fi
+            sleep 1
+          done
+          cat status.json
+          test -n "$ok"
+          grep -q '"sim":{' status.json
+          ./build-local/3dp home --http 7444
+          kill %1
 
   driver-sources:
     # Compila ogni sorgente del driver con le dipendenze vere (Boost.Asio, librdkafka,

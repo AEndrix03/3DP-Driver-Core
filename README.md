@@ -79,8 +79,18 @@ build-local/3dp serve --port /dev/ttyUSB0  # su Windows: --port COM3
 
 - **Servizio**: tiene la porta seriale, esegue le stampe, salva lo storico in
   `3dp-data/history.sqlite` e i G-code in `3dp-data/gcode/`.
-- **Pagina di gestione**: `http://127.0.0.1:7333` (stato, temperatura, avanzamento, movimento
-  manuale, pausa, ripresa, annulla, arresto d'emergenza, caricamento di un G-code, storico).
+- **Pagina di gestione**: `http://127.0.0.1:7333`, quattro schede.
+  - *Controllo*: la stampante in 3D con hotend e ugello, il percorso e la durata prevista; sotto,
+    i valori letti dalla macchina (posizione eseguita, velocita', coda del firmware, movimenti al
+    secondo, ritrasmissioni) e la traccia della seriale. A lato: lavoro in corso, file, ugello,
+    movimento manuale.
+  - *Test*: prove di movimento eseguite dal driver (vedi "Test").
+  - *Configurazione*: i valori scelti dall'operatore, salvati in `3dp-data/config.ini`.
+  - *Storico*: i lavori fatti, con gli errori e gli avvisi capitati durante ciascuno.
+- **Modalita'**, indicata in alto: *Simulazione* (stampante simulata), *Pronta* (macchina vera
+  ferma: comandi liberi e test), *In stampa* (macchina vera al lavoro: si osserva; restano
+  pausa, ripresa, annulla, arresto e le regolazioni di velocita'; movimenti manuali e test sono
+  spenti, e il servizio li rifiuta comunque).
 - **Riga di comando**: lo stesso eseguibile e' il client delle stesse API, e risponde in JSON.
   E' il modo in cui uno script o un agente pilota la stampante.
 
@@ -92,10 +102,100 @@ build-local/3dp serve --port /dev/ttyUSB0  # su Windows: --port COM3
 | `3dp temp 200` / `3dp fan 50` | ugello (gradi), ventola (percento) |
 | `3dp gcode "G1 X10 F3000"` | una riga di G-code; durante una stampa passa davanti al job |
 | `3dp upload file.gcode` / `3dp print file.gcode` | salva nello spazio del servizio / avvia la stampa |
-| `3dp check file.gcode` | cosa farebbe il driver con il file, senza stampante: comandi saltati o incompatibili, ingombro, strati, filamento |
+| `3dp check file.gcode` | cosa farebbe il driver con il file, senza stampante: comandi saltati o incompatibili, ingombro, strati, filamento, durata prevista (`estimatedSeconds`) |
 | `3dp slice modello.stl [layer=0.2 infill=20 temp=205 perimeters=2 speed=45 supports=0 brim=0]` | affetta il modello con PrusaSlicer e controlla il risultato, senza stampante |
+| `3dp config [chiave=valore ...]` | mostra o cambia la configurazione |
+| `3dp test kind=shuttle axis=x distance=50 feed=3000 repeats=5` | prova di movimento (vedi "Test") |
+| `3dp endstops` | stato dei finecorsa |
 | `3dp pause` / `resume` / `cancel` / `clear` | controllo della stampa, azzeramento errore |
 | `3dp estop` | arresto di emergenza: ferma i motori e spegne l'heater |
+
+### Anteprima e durata prevista
+
+Scelto un file, la pagina ne disegna il percorso (trascinare per ruotare, rotella per lo zoom,
+Maiusc o tasto destro per spostare, doppio clic per reinquadrare; cursore a destra per fermarsi
+a uno strato) e indica quanto durera' la stampa. Il tasto di riproduzione fa scorrere la stampa
+a velocita' accelerata.
+
+- La durata non e' una stima a velocita' costante: `GET /api/preview?file=...` fa passare il
+  file per lo stesso pianificatore usato in stampa (`src/translator/GCodePreview.cpp`), con i
+  limiti letti dal firmware e le regolazioni in uso, e somma la durata di ogni blocco.
+- Verifica: lo scenario e2e "preview and time estimate" esegue lo stesso file sul firmware
+  simulato e richiede che la stima stia entro il 5% del tempo impiegato dal generatore di step.
+  Un pezzo vero (3DBenchy, 94.000 comandi) e' stato stampato per intero sulla macchina simulata.
+- Restano fuori riscaldamento e homing, che non dipendono dal percorso: la pagina lo segnala.
+- Il disegno della macchina (ponte mobile, hotend) e' una rappresentazione generica: non
+  descrive la meccanica reale.
+
+### Cosa viene dalla macchina e cosa no
+
+Durante un lavoro la testina disegnata e la parte colorata del percorso seguono la **posizione
+eseguita**, non le righe lette dal file. Viene dalle conferme del firmware: ogni risposta dice
+fino a quale comando e' arrivata l'esecuzione, quindi posizione eseguita = posizione dell'ultimo
+movimento inviato meno i movimenti inviati e non ancora completati (`src/local/WirePort.cpp`,
+`GET /api/live`). La precisione e' di un movimento: dentro un movimento la pagina interpola.
+Velocita' = quella nominale del movimento in esecuzione, non una misura.
+
+La stessa "spia" sulla seriale tiene la traccia degli ultimi scambi: per ogni frame binario i
+byte e la traduzione (`MOVE #12 X160 Y-8 E5 V60 A1000 S..J..`), per ogni risposta il testo o
+`ACK #12, 3 da completare`.
+
+### Regolare la velocita'
+
+Due leve, nella scheda Controllo e in Configurazione, modificabili anche a lavoro in corso:
+
+- **Velocita' del lavoro (%)**: moltiplica le velocita' chieste dal G-code (non le ritrazioni).
+  E' quella da usare se la meccanica non regge.
+- **Movimenti al secondo**: tetto ai blocchi inviati alla scheda; il massimo, 678, e' quello
+  misurato sul collegamento. Il pianificatore ne tiene conto (un segmento non viene percorso in
+  meno del tempo che serve a inviarlo), quindi con un tetto basso i tratti corti rallentano in
+  modo regolare invece di svuotare la coda del firmware.
+
+### Configurazione
+
+`3dp-data/config.ini`, righe `chiave=valore`; si modifica dalla pagina o con
+`3dp config chiave=valore ...` (`3dp config` da solo la mostra). Il driver la legge all'avvio e a
+ogni modifica. Contiene le scelte dell'operatore: velocita', accelerazioni richieste, linear
+advance, tetti piu' bassi di quelli del firmware per velocita'/accelerazione/giunzione, volume
+usato nei controlli, guadagni PID da inviare alla scheda, slicer.
+
+I valori che proteggono la macchina (step/mm, velocita' e accelerazioni massime, corsa, coda)
+restano nel firmware: il driver li legge con `M115`, la pagina li mostra in sola lettura, e i
+tetti della configurazione possono solo abbassarli. Le voci che cambiano i limiti si possono
+modificare solo a macchina ferma.
+
+### Test
+
+Scheda Test, o `3dp test kind=... [axis= distance= feed= feed2= repeats= segment=]`. Ogni test
+genera un piccolo G-code di movimenti relativi alla posizione attuale e lo esegue come un lavoro:
+si vede nel visualizzatore, si puo' mettere in pausa o annullare, resta nello storico con i suoi
+errori. Prima di partire il servizio controlla che ci sia corsa sufficiente.
+
+| `kind` | Cosa fa |
+|--------|---------|
+| `shuttle` | un asse avanti e indietro |
+| `ladder` | la stessa corsa a velocita' crescenti, da `feed` a `feed2` |
+| `square`, `circle` | quadrato e cerchio (arco `G2`) su X e Y |
+| `stream` | migliaia di segmenti corti: mette sotto sforzo collegamento e coda |
+| `extrude` | spinge una lunghezza nota di filamento |
+
+`3dp endstops` legge i finecorsa, `3dp diag` la diagnostica del firmware. I test dicono cosa ha
+fatto il collegamento (movimenti, ritrasmissioni, errori); se la meccanica ha perso passi lo
+si vede e lo si sente, il driver non lo misura.
+
+### Stampante simulata
+
+```
+tools/build_local.sh --sim                 # compila anche il firmware per il PC (serve il suo repo accanto)
+build-local/3dp serve --sim --speed 12     # nessuna scheda: http://127.0.0.1:7333
+```
+
+Al posto della scheda c'e' il firmware vero, compilato per il PC con la scheda finta dei test
+(`test/native` nel repo del firmware): stesso protocollo, stesso generatore di step, finecorsa
+e ugello come modelli. Serve a provare pagina, file e tempi senza hardware. `--speed` e' quante
+volte piu' in fretta del reale scorre il tempo della macchina (si cambia anche dalla pagina).
+I dati vanno in `3dp-data-sim/`, separati da quelli della macchina vera. Non dice nulla su
+meccanica, motori e termica reali.
 
 ### Slicer
 
@@ -106,7 +206,8 @@ nessun piano riscaldato, archi veri `G2`/`G3`, G-code di avvio con homing e line
 - Installazione: `sudo apt install prusa-slicer` (Ubuntu) oppure `sudo pacman -S prusa-slicer`
   (Arch). Se l'eseguibile non e' nel PATH: variabile `THREEDP_SLICER`. Profilo diverso:
   `THREEDP_SLICER_PROFILE`.
-- Dalla pagina basta scegliere un `.stl`: viene affettato, controllato e, dopo conferma, stampato.
+- Dalla pagina basta scegliere un `.stl`: viene affettato, controllato e mostrato in anteprima;
+  la stampa parte con "Avvia stampa".
   Nello storico restano il modello di partenza e i parametri usati.
 - Una stampa non parte se il file non supera il controllo (esce dal volume, usa un secondo
   estrusore, pollici, ...); `force=1` per insistere.
@@ -116,7 +217,7 @@ nessun piano riscaldato, archi veri `G2`/`G3`, G-code di avvio con homing e line
   (`tests/fixtures/prusaslicer_ring.gcode`).
 - I valori del profilo segnati "VERIFICARE" (ritrazione, velocita') dipendono dalla meccanica.
 
-Le API (`GET /api/status`, `GET /api/history`, `POST /api/<comando>?chiave=valore`) ascoltano
+Le API (`GET /api/status`, `/api/live`, `/api/history`, `/api/preview`, `/api/config`, `POST /api/<comando>?chiave=valore`) ascoltano
 solo su `127.0.0.1` e non hanno autenticazione: muovono una macchina, non vanno esposte in rete.
 La porta seriale e' in `src/local/NativeSerialPort.cpp` (Win32 e termios, nessuna libreria).
 
@@ -155,6 +256,12 @@ esatta, e il secondo bit di stop da' margine all'adattatore USB (misure in `PROT
 firmware, "Velocita' della linea"). Su Linux 250000 si imposta con `termios2`
 (`src/core/serial/LinuxBaud.cpp`); questa parte e' compilata dalla CI ma non e' stata provata
 su una scheda collegata a Linux.
+
+Su Windows, con le schede clone che montano un CH340 non originale: il driver WCH 3.8/3.9
+rifiuta la configurazione della porta (`cannot configure COMx (error 31)`); funziona il
+3.5.2019.1. Windows Update tende a rimettere quello nuovo: `pnputil /enum-drivers` mostra quale
+pacchetto `ch341ser.inf` e' installato, `pnputil /delete-driver oemNN.inf /uninstall /force`
+(da amministratore) toglie quello sbagliato.
 
 ### Movimenti binari
 

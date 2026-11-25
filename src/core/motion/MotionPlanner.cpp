@@ -66,8 +66,13 @@ namespace core::planning {
         s.extrusion = s.print ? mm[3] / s.length : 0.0;
         for (int a = 0; a < 3; ++a) s.unit[a] = s.cartesian ? mm[a] / s.length : 0.0;
 
+        s.cost = (s.print && advanceK_ > 0.0 && s.length >= SPLIT_MIN_LENGTH) ? 3 : 1;
+
         // --- velocita' e accelerazione: quelle richieste, entro i limiti di ogni asse ---
-        double speed = std::max(feedMmS, MIN_SPEED);
+        double speed = feedMmS * (s.cartesian ? speedFactor_ : 1.0); // ritrazioni e spurghi restano come chiesti
+        // non piu' in fretta di quanto i suoi blocchi si riescono a inviare
+        if (blockRate_ > 0.0) speed = std::min(speed, s.length * blockRate_ / s.cost);
+        speed = std::max(speed, MIN_SPEED);
         double acceleration = limits_.maxAcceleration[3];
         if (s.cartesian) {
             acceleration = limits_.maxAcceleration[0];
@@ -98,8 +103,6 @@ namespace core::planning {
         const long long nominalSqr = nominalUnits * nominalUnits;
         s.gainSqr = s.count >= nominalSqr / gain ? UNLIMITED : static_cast<double>(gain * s.count) / 4096.0;
         s.gainPerMm = static_cast<double>(gain) * static_cast<double>(s.count) / 4096.0 / s.length;
-
-        s.cost = (s.print && advanceK_ > 0.0 && s.length >= SPLIT_MIN_LENGTH) ? 3 : 1;
         return true;
     }
 
@@ -118,8 +121,25 @@ namespace core::planning {
         return std::min(speed, limit);
     }
 
-    void MotionPlanner::push(const long long steps[4], double feedMmMin, std::vector<PlannedBlock> &out) {
+    double PlannedBlock::seconds() const {
+        if (length <= 0.0 || nominal <= 0.0 || acceleration <= 0.0 || deceleration <= 0.0) return 0.0;
+        const double v0 = std::min(entry, nominal), v1 = std::min(exit, nominal);
+        const double up = (nominal * nominal - v0 * v0) / (2.0 * acceleration);
+        const double down = (nominal * nominal - v1 * v1) / (2.0 * deceleration);
+        if (up + down <= length) {
+            return (nominal - v0) / acceleration + (nominal - v1) / deceleration + (length - up - down) / nominal;
+        }
+        // troppo corto per arrivare alla velocita' nominale: si accelera fino a un picco e si frena
+        const double peakSqr = (2.0 * acceleration * deceleration * length + deceleration * v0 * v0 +
+                                acceleration * v1 * v1) / (acceleration + deceleration);
+        const double peak = std::sqrt(std::max(peakSqr, std::max(v0 * v0, v1 * v1)));
+        return (peak - v0) / acceleration + (peak - v1) / deceleration;
+    }
+
+    void MotionPlanner::push(const long long steps[4], double feedMmMin, std::vector<PlannedBlock> &out,
+                             uint32_t tag) {
         Segment segment;
+        segment.tag = tag;
         for (int a = 0; a < 4; ++a) segment.steps[a] = steps[a];
         if (!describe(segment, feedMmMin / 60.0)) return;
 
@@ -280,6 +300,9 @@ namespace core::planning {
         block.exit = exit;
         block.nominal = nominal;
         block.length = length;
+        block.acceleration = parent.acceleration;
+        block.deceleration = parent.gainPerMm > 0.0 ? parent.gainPerMm / 2.0 : parent.acceleration;
+        block.tag = parent.tag;
         out.push_back(block);
     }
 

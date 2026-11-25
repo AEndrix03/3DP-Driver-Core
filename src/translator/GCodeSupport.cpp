@@ -103,6 +103,7 @@ namespace translator::gcode {
 
         bool absolute = true, absoluteE = true, moved = false, homedBeforeMove = false;
         double x = 0, y = 0, z = 0, e = 0;
+        double eHighest = 0; // punto piu' avanzato raggiunto dal filamento: oltre quello e' consumo
         std::string line;
 
         while (std::getline(file, line)) {
@@ -146,7 +147,10 @@ namespace translator::gcode {
                 if (params.count('X')) x = params['X'];
                 if (params.count('Y')) y = params['Y'];
                 if (params.count('Z')) z = params['Z'];
-                if (params.count('E')) e = params['E'];
+                if (params.count('E')) {
+                    eHighest += params['E'] - e; // cambia solo l'origine, non il filamento gia' uscito
+                    e = params['E'];
+                }
             } else if (command == "M104" || command == "M109") {
                 if (params.count('S')) report.maxHotend = std::max(report.maxHotend, params['S']);
             } else if (command == "G0" || command == "G1" || command == "G2" || command == "G3" || command == "G5") {
@@ -158,7 +162,10 @@ namespace translator::gcode {
                 if (params.count('Z')) z = absolute ? params['Z'] : z + params['Z'];
                 if (params.count('E')) {
                     const double target = absoluteE ? params['E'] : e + params['E'];
-                    if (target > e) report.filamentMm += target - e;
+                    if (target > eHighest) {
+                        report.filamentMm += target - eHighest;
+                        eHighest = target;
+                    }
                     e = target;
                 }
                 if (!report.hasBounds) {

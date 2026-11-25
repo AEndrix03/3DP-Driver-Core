@@ -5,6 +5,10 @@
  *       tiene la porta seriale, esegue le stampe, espone le API su http://127.0.0.1:7333
  *       e serve la pagina di gestione. Nessun backend, Kafka o database esterno.
  *
+ *   3dp serve --sim [--speed 12]
+ *       come sopra, ma con la stampante simulata (firmware vero compilato per il PC):
+ *       per provare pagina e file senza hardware. Richiede `tools/build_local.sh --sim`.
+ *
  *   3dp <comando> [chiave=valore ...]
  *       client delle stesse API: status, home, jog, temp, fan, gcode, print, upload,
  *       pause, resume, cancel, estop, clear, history, diag. Stampa la risposta JSON.
@@ -21,6 +25,9 @@
 
 #include "WebUi.hpp"
 #include "Slicer.hpp"
+#include "SimPort.hpp"
+#include "WirePort.hpp"
+#include "Settings.hpp"
 #include "core/DriverInterface.hpp"
 #include "core/printer/job/GCodeDownloader.hpp"
 #include "core/printer/job/PrintJobManager.hpp"
@@ -39,10 +46,13 @@
 #include "translator/dispatchers/endstop/EndstopDispatcher.hpp"
 #include "translator/dispatchers/compat/CompatibilityDispatcher.hpp"
 #include "translator/GCodeSupport.hpp"
+#include "translator/GCodePreview.hpp"
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -140,14 +150,26 @@ namespace {
     // ------------------------------------------------------------------ servizio
     class Service {
     public:
-        Service(const std::string &device, const std::string &dataDir)
-                : dataDir_(dataDir), history_((std::filesystem::path(dataDir) / "history.sqlite").string()) {
-            port_ = std::make_shared<local::NativeSerialPort>(device, core::DEFAULT_SERIAL_BAUD);
+        /// @param device porta seriale; vuota = stampante simulata alla velocita' `simSpeed`
+        Service(const std::string &device, const std::string &dataDir, double simSpeed)
+                : dataDir_(dataDir), history_((std::filesystem::path(dataDir) / "history.sqlite").string()),
+                  settings_((std::filesystem::path(dataDir) / "config.ini").string()),
+                  simulated_(device.empty()) {
+            std::shared_ptr<core::SerialPort> raw;
+            if (simulated_) {
+                raw = local::openSim(simSpeed);
+                if (!raw) portError_ = "this build has no simulator (build it with: tools/build_local.sh --sim)";
+            } else {
+                const auto native = std::make_shared<local::NativeSerialPort>(device, core::DEFAULT_SERIAL_BAUD);
+                portError_ = native->lastError();
+                raw = native;
+            }
+            if (raw) port_ = wire_ = std::make_shared<local::WirePort>(raw);
         }
 
         bool start(std::string &error) {
-            if (!port_->isOpen()) {
-                error = port_->lastError();
+            if (!port_ || !port_->isOpen()) {
+                error = portError_;
                 return false;
             }
             if (!history_.isOpen()) {
@@ -166,6 +188,7 @@ namespace {
                 error = "the firmware did not answer on the serial port";
                 return false;
             }
+            if (simulated_) local::simReady();
 
             driver_ = std::make_shared<core::DriverInterface>(nullptr, port_);
             translator_ = std::make_shared<translator::gcode::GCodeTranslator>(driver_);
@@ -182,6 +205,14 @@ namespace {
 
             if (!driver_->system()->printStatus().isSuccess()) {
                 error = "the firmware did not accept the first command";
+                return false;
+            }
+            applySettings(true);
+            // Limiti, coda e corsa dichiarati dalla scheda: senza non si pianifica. Meglio saperlo subito.
+            const auto machine = driver_->motion()->readMachine();
+            if (!machine.isSuccess()) {
+                error = "the firmware did not report its limits (" + machine.message +
+                        "): the board probably runs an older firmware, flash the current one";
                 return false;
             }
             running_ = true;
@@ -202,7 +233,11 @@ namespace {
             const auto info = core::jobs::JobTracker::getInstance().getJobInfo(activeJob_);
 
             std::ostringstream out;
-            out << "{\"connected\":" << (port_->isOpen() && !driver_->isLinkFaulted() ? "true" : "false")
+            out << "{\"mode\":" << quote(simulated_ ? "sim" : activeJob_.empty() ? "idle" : "print")
+                << ",\"speedPercent\":" << number(settings_.number("speed_percent"), 0)
+                << ",\"blocksPerSecond\":" << number(settings_.number("blocks_per_second"), 0)
+                << ",\"preheat\":" << number(settings_.number("preheat"), 0)
+                << ",\"connected\":" << (port_->isOpen() && !driver_->isLinkFaulted() ? "true" : "false")
                 << ",\"state\":" << quote(core::DriverInterface::printStateToString(driver_->getState()))
                 << ",\"fault\":" << quote(faultText_)
                 << ",\"lastResult\":" << quote(lastResult_)
@@ -211,8 +246,15 @@ namespace {
                 << ",\"state\":" << quote(activeJob_.empty() ? "" : jobStateName(state))
                 << ",\"percent\":" << number(info ? info->getProgress() : 0.0, 2)
                 << ",\"linesDone\":" << (info ? info->executedCommands : 0)
-                << ",\"linesTotal\":" << (info ? info->totalCommands : 0) << "}"
+                << ",\"linesTotal\":" << (info ? info->totalCommands : 0)
+                << ",\"test\":" << (activeTest_ ? "true" : "false")
+                << ",\"file\":" << quote(activePath_)
+                << ",\"elapsed\":" << (activeJob_.empty() ? 0 : static_cast<long long>(std::time(nullptr) - activeStart_))
+                << "}"
                 << ",\"linearAdvance\":" << driver_->motion()->linearAdvance()
+                << ",\"sim\":" << (simulated_ ? "{\"speed\":" + number(local::simSpeed(), 2) + "}" : "null")
+                << ",\"volume\":{\"x\":" << settings_.number("volume_x") << ",\"y\":" << settings_.number("volume_y")
+                << ",\"z\":" << settings_.number("volume_z") << "}"
                 << ",\"temperature\":{\"known\":" << (tempKnown_ ? "true" : "false")
                 << ",\"current\":" << number(tempCurrent_, 1) << ",\"target\":" << number(tempTarget_, 1) << "}"
                 << ",\"position\":{\"known\":" << (posKnown_ ? "true" : "false")
@@ -231,9 +273,58 @@ namespace {
                        ",\"gcodePath\":" + quote(r.gcodePath) + ",\"sourcePath\":" + quote(r.sourcePath) +
                        ",\"slicerParams\":" + quote(r.slicerParams) + ",\"state\":" + quote(r.state) +
                        ",\"error\":" + quote(r.error) + ",\"startedAt\":" + std::to_string(r.startedAt) +
-                       ",\"finishedAt\":" + std::to_string(r.finishedAt) + ",\"lines\":" + std::to_string(r.lines) + "}";
+                       ",\"finishedAt\":" + std::to_string(r.finishedAt) + ",\"lines\":" + std::to_string(r.lines) +
+                       ",\"events\":[";
+                for (size_t i = 0; i < r.events.size(); ++i) {
+                    out += (i ? "," : "") + std::string("{\"at\":") + std::to_string(r.events[i].at) + ",\"level\":" +
+                           quote(r.events[i].level) + ",\"text\":" + quote(r.events[i].text) + "}";
+                }
+                out += "]}";
             }
             return out + "]}";
+        }
+
+        /**
+         * Cio' che la macchina sta facendo davvero, per la pagina: posizione eseguita (quella
+         * inviata meno i movimenti che il firmware non ha ancora completato), velocita' del
+         * movimento in corso, coda, contatori del collegamento e ultimi scambi sulla seriale.
+         */
+        std::string live(uint64_t after) {
+            const auto wire = wire_->live();
+            const auto sent = driver_->motion()->sentPosition();
+            const auto limits = driver_->motion()->plannerLimits();
+            const bool moving = wire.queued > 0;
+
+            std::ostringstream out;
+            out << "{\"ok\":true,\"exec\":{\"known\":" << (sent.valid ? "true" : "false");
+            if (sent.valid) {
+                const char *names[3] = {"x", "y", "z"};
+                for (int a = 0; a < 3; ++a) {
+                    out << ",\"" << names[a] << "\":"
+                        << number(static_cast<double>(sent.steps[a] - wire.outstanding[a]) / sent.stepsPerMm[a]);
+                }
+            }
+            out << "},\"moving\":" << (moving ? "true" : "false")
+                << ",\"speed\":" << number(moving ? wire.speed : 0.0, 2)
+                << ",\"acceleration\":" << number(moving ? wire.acceleration : 0.0, 0)
+                << ",\"queued\":" << wire.queued << ",\"queueSize\":" << limits.queueBlocks
+                << ",\"link\":{\"framesTx\":" << wire.framesTx << ",\"acksRx\":" << wire.acksRx
+                << ",\"textTx\":" << wire.textTx << ",\"textRx\":" << wire.textRx
+                << ",\"bytesTx\":" << wire.bytesTx << ",\"bytesRx\":" << wire.bytesRx
+                << ",\"resent\":" << wire.resent << ",\"errors\":" << wire.errors << "},"
+                << wire_->json(after, 60) << "}";
+            return out.str();
+        }
+
+        /// Percorso e tempi previsti di un file, con i limiti e il linear advance in uso.
+        std::string preview(const std::string &file) {
+            if (file.empty() || !std::filesystem::exists(file)) return reply(false, "file not found");
+            const auto result = translator::gcode::buildPreview(file, driver_->motion()->plannerLimits(),
+                                                                driver_->motion()->linearAdvance(),
+                                                                settings_.number("speed_percent") / 100.0,
+                                                                settings_.number("blocks_per_second"));
+            if (!result.readable) return reply(false, "cannot read the file");
+            return translator::gcode::previewJson(result);
         }
 
         // ---- comandi ----
@@ -243,18 +334,29 @@ namespace {
 
             if (name == "estop") {
                 // Prima di tutto: fermare i motori e spegnere l'heater, anche a stampa in corso
+                event("error", "arresto di emergenza");
                 driver_->abortMotion();
                 if (printing) manager_->cancelJob();
                 const auto stopped = driver_->motion()->emergencyStop();
                 driver_->temperature()->setHotendTemperature(0);
                 return reply(stopped.isSuccess(), "emergency stop sent");
             }
-            if (name == "pause") return reply(manager_->pauseJob(), "pause");
+            if (name == "pause") {
+                const bool ok = manager_->pauseJob();
+                if (ok) event("info", "pausa chiesta dall'operatore");
+                return reply(ok, "pause");
+            }
             if (name == "resume") {
                 const bool ok = manager_->resumeJob();
+                if (ok) event("info", "ripresa");
                 return reply(ok, ok ? "resume" : manager_->lastRecoveryError());
             }
-            if (name == "cancel") return reply(manager_->cancelJob(), "cancel");
+            if (name == "cancel") {
+                event("warn", "annullata dall'operatore");
+                return reply(manager_->cancelJob(), "cancel");
+            }
+            if (name == "config") return configure(params, printing);
+            if (name == "endstops") return reply(driver_->endstop()->readEndstopStatus());
             if (name == "clear") return reply(driver_->system()->clearError());
             if (name == "diag") return reply(driver_->system()->diagnostics());
             if (name == "temp") {
@@ -272,15 +374,23 @@ namespace {
                 // Linear advance: vale dai movimenti successivi, anche a stampa in corso
                 const auto k = numberParam(params, "k");
                 if (!k || *k < 0.0 || *k > 2.0) return reply(false, "missing or invalid k=<0..2 seconds>");
+                settings_.set("linear_advance", std::to_string(*k));
+                settings_.save();
                 driver_->motion()->setLinearAdvance(*k);
                 return reply(true, "linear advance set");
+            }
+            if (name == "simspeed") {
+                const auto speed = numberParam(params, "s");
+                if (!simulated_) return reply(false, "not a simulated printer");
+                if (!speed || *speed <= 0.0) return reply(false, "missing s=<time scale>");
+                local::simSetSpeed(*speed);
+                return reply(true, "simulation speed set");
             }
             if (name == "upload") return upload(params, body);
             if (name == "check") {
                 const auto it = params.find("file");
                 if (it == params.end()) return reply(false, "missing file=<path>");
-                const auto report = translator::gcode::checkFile(it->second, local::VOLUME_X, local::VOLUME_Y,
-                                                                 local::VOLUME_Z);
+                const auto report = checkFile(it->second);
                 return reply(report.printable(), report.printable() ? "printable" : "not printable",
                              "\"report\":" + local::reportJson(report));
             }
@@ -305,6 +415,7 @@ namespace {
             // Da qui: movimenti manuali, non ammessi durante una stampa
             if (printing) return reply(false, "not allowed while a print is active");
 
+            if (name == "test") return test(params);
             if (name == "home") {
                 toIdle();
                 const auto it = params.find("axes");
@@ -331,7 +442,11 @@ namespace {
     private:
         std::string dataDir_;
         local::History history_;
-        std::shared_ptr<local::NativeSerialPort> port_;
+        local::Settings settings_;
+        std::shared_ptr<core::SerialPort> port_;
+        std::shared_ptr<local::WirePort> wire_; ///< la stessa porta, vista come traccia degli scambi
+        std::string portError_;
+        bool simulated_ = false;
         std::shared_ptr<core::DriverInterface> driver_;
         std::shared_ptr<translator::gcode::GCodeTranslator> translator_;
         std::shared_ptr<core::CommandExecutorQueue> queue_;
@@ -342,9 +457,234 @@ namespace {
         std::thread poller_;
         std::atomic<bool> running_{false};
 
-        std::string activeJob_, activeName_, faultText_, lastResult_;
+        bool activeTest_ = false;
+        uint64_t jobResent_ = 0, jobErrors_ = 0, jobFrames_ = 0; ///< contatori del collegamento a inizio lavoro
+        std::string activeJob_, activeName_, activePath_, faultText_, lastResult_;
+        std::time_t activeStart_ = 0;
         bool tempKnown_ = false, posKnown_ = false, posReferenced_ = false;
         double tempCurrent_ = 0, tempTarget_ = 0, posX_ = 0, posY_ = 0, posZ_ = 0;
+
+        translator::gcode::FileReport checkFile(const std::string &path) {
+            return translator::gcode::checkFile(path, settings_.number("volume_x"), settings_.number("volume_y"),
+                                                settings_.number("volume_z"));
+        }
+
+        /// Annota qualcosa nello storico del lavoro in corso (niente se non ce n'e' uno).
+        void event(const std::string &level, const std::string &text) {
+            std::string job;
+            {
+                std::lock_guard<std::mutex> lock(cacheMutex_);
+                job = activeJob_;
+            }
+            if (!job.empty()) history_.addEvent(job, level, text);
+        }
+
+        /// Porta nel driver i valori della configurazione. `all` = anche quelli che valgono solo da fermi.
+        void applySettings(bool all) {
+            const auto motion = driver_->motion();
+            motion->setSpeedFactor(settings_.number("speed_percent") / 100.0);
+            motion->setBlockRate(settings_.number("blocks_per_second"));
+            motion->setAccelerations(settings_.number("accel_print"), settings_.number("accel_travel"));
+            motion->setLinearAdvance(settings_.number("linear_advance"));
+            for (const char *key: {"slicer_path", "slicer_profile"}) {
+                const std::string value = settings_.text(key);
+                const char *variable = std::string(key) == "slicer_path" ? "THREEDP_SLICER" : "THREEDP_SLICER_PROFILE";
+                if (value.empty()) continue; // vuoto = resta la variabile d'ambiente, se c'e'
+#ifdef _WIN32
+                _putenv_s(variable, value.c_str());
+#else
+                setenv(variable, value.c_str(), 1);
+#endif
+            }
+            if (!all) return;
+
+            core::planning::MachineLimits caps;
+            for (int a = 0; a < 4; ++a) caps.maxFeed[a] = caps.maxAcceleration[a] = 0.0;
+            caps.junctionDeviation = settings_.number("junction_deviation");
+            caps.maxFeed[0] = caps.maxFeed[1] = settings_.number("max_feed_xy");
+            caps.maxFeed[2] = settings_.number("max_feed_z");
+            caps.maxFeed[3] = settings_.number("max_feed_e");
+            caps.maxAcceleration[0] = caps.maxAcceleration[1] = settings_.number("max_accel_xy");
+            caps.maxAcceleration[2] = settings_.number("max_accel_z");
+            caps.maxAcceleration[3] = settings_.number("max_accel_e");
+            motion->setLimitCaps(caps);
+
+            const double p = settings_.number("pid_p"), i = settings_.number("pid_i"), d = settings_.number("pid_d");
+            if (p > 0.0 || i > 0.0 || d > 0.0) driver_->temperature()->setPid(p, i, d);
+        }
+
+        /// La configurazione, con accanto cio' che il firmware ha dichiarato (sola lettura).
+        std::string configJson(bool ok, const std::string &message) {
+            const auto info = driver_->motion()->machineInfo();
+            std::ostringstream fw;
+            fw << "\"firmware\":{\"known\":" << (info.valid ? "true" : "false");
+            if (info.valid) {
+                const auto &l = info.limits;
+                fw << ",\"stepsPerMm\":[" << l.stepsPerMm[0] << "," << l.stepsPerMm[1] << "," << l.stepsPerMm[2] << ","
+                   << l.stepsPerMm[3] << "],\"maxFeed\":[" << l.maxFeed[0] << "," << l.maxFeed[1] << "," << l.maxFeed[2]
+                   << "," << l.maxFeed[3] << "],\"maxAcceleration\":[" << l.maxAcceleration[0] << ","
+                   << l.maxAcceleration[1] << "," << l.maxAcceleration[2] << "," << l.maxAcceleration[3]
+                   << "],\"junctionDeviation\":" << l.junctionDeviation << ",\"maxStepRate\":" << l.maxStepRate
+                   << ",\"queueBlocks\":" << l.queueBlocks << ",\"receiveBuffer\":" << info.receiveBuffer
+                   << ",\"travel\":[" << info.travelMm[0] << "," << info.travelMm[1] << "," << info.travelMm[2] << "]";
+            }
+            fw << "}";
+            return reply(ok, message, settings_.json() + "," + fw.str());
+        }
+
+        std::string configure(const Params &params, bool printing) {
+            if (params.empty()) return configJson(true, "configuration");
+            // prima si controlla tutto, poi si cambia: o passano tutte le voci o nessuna
+            for (const auto &[key, value]: params) {
+                for (const local::Setting &s: local::Settings::catalog()) {
+                    if (key == s.key && printing && !s.whilePrinting) {
+                        return configJson(false, std::string(s.label) + ": can be changed only while not printing");
+                    }
+                }
+            }
+            local::Settings trial = settings_copy();
+            for (const auto &[key, value]: params) {
+                const std::string refused = trial.set(key, value);
+                if (!refused.empty()) return configJson(false, refused);
+            }
+            for (const auto &[key, value]: params) settings_.set(key, value);
+            if (!settings_.save()) return configJson(false, "cannot write the configuration file");
+            applySettings(!printing);
+            return configJson(true, "saved");
+        }
+
+        /// Copia di prova, su un file che non viene mai scritto.
+        local::Settings settings_copy() { return local::Settings(""); }
+
+        /**
+         * Utilita' di prova: generano un piccolo G-code (movimenti relativi alla posizione attuale)
+         * e lo eseguono come un lavoro qualsiasi, cosi' si vede nel visualizzatore, si puo'
+         * mettere in pausa o annullare e resta nello storico con i suoi errori.
+         */
+        std::string test(const Params &params) {
+            const auto text = [&params](const char *key, const std::string &fallback) {
+                const auto it = params.find(key);
+                return it == params.end() || it->second.empty() ? fallback : it->second;
+            };
+            const auto value = [&params](const char *key, double fallback) {
+                return numberParam(params, key).value_or(fallback);
+            };
+            const std::string kind = text("kind", "");
+            std::string axis = text("axis", "x");
+            for (char &c: axis) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            const double distance = value("distance", 50.0), feed = value("feed", 3000.0), feedTo = value("feed2", feed);
+            const int repeats = static_cast<int>(value("repeats", 3.0));
+            const double segment = value("segment", 0.1);
+            if (distance <= 0.0 || distance > 500.0 || feed < 10.0 || feed > 30000.0 || feedTo < 10.0 ||
+                feedTo > 30000.0 || repeats < 1 || repeats > 200 || segment < 0.02 || segment > 10.0) {
+                return reply(false, "test: value out of range");
+            }
+            if (axis != "X" && axis != "Y" && axis != "Z") return reply(false, "test: axis must be x, y or z");
+
+            double x, y, z;
+            bool known, referenced;
+            {
+                std::lock_guard<std::mutex> lock(cacheMutex_);
+                x = posX_, y = posY_, z = posZ_;
+                known = posKnown_, referenced = posReferenced_;
+            }
+            if (!known) return reply(false, "test: the machine position is not known yet");
+            // spazio necessario in X, Y, Z a partire dalla posizione attuale (i test vanno solo in positivo)
+            double need[3] = {0, 0, 0};
+            std::ostringstream g;
+            std::string title;
+            const auto num = [](double v) {
+                char buffer[32];
+                std::snprintf(buffer, sizeof(buffer), "%.3f", v);
+                return std::string(buffer);
+            };
+            const auto show = [](double v) { // per i titoli: senza zeri inutili
+                char buffer[32];
+                std::snprintf(buffer, sizeof(buffer), "%g", v);
+                return std::string(buffer);
+            };
+            if (kind == "shuttle" || kind == "ladder") {
+                need[axis[0] - 'X'] = distance;
+                const int steps = kind == "ladder" ? std::max(2, repeats) : repeats;
+                for (int i = 0; i < steps; ++i) {
+                    const double f = kind == "ladder" ? feed + (feedTo - feed) * i / (steps - 1) : feed;
+                    g << "G1 " << axis << num(distance) << " F" << num(f) << "\nG1 " << axis << num(-distance) << "\n";
+                }
+                title = kind == "ladder"
+                        ? "scala di velocita' " + axis + " " + show(distance) + " mm, " + show(feed / 60) + "-" + show(feedTo / 60) + " mm/s"
+                        : "va e vieni " + axis + " " + show(distance) + " mm a " + show(feed / 60) + " mm/s x" + std::to_string(repeats);
+            } else if (kind == "square") {
+                need[0] = need[1] = distance;
+                for (int i = 0; i < repeats; ++i) {
+                    g << "G1 X" << num(distance) << " F" << num(feed) << "\nG1 Y" << num(distance) << "\nG1 X"
+                      << num(-distance) << "\nG1 Y" << num(-distance) << "\n";
+                }
+                title = "quadrato " + show(distance) + " mm a " + show(feed / 60) + " mm/s x" + std::to_string(repeats);
+            } else if (kind == "circle") {
+                need[0] = need[1] = distance;
+                const double r = distance / 2.0;
+                g << "G1 Y" << num(r) << " F" << num(feed) << "\n";
+                for (int i = 0; i < repeats; ++i) g << "G2 I" << num(r) << " J0 F" << num(feed) << "\n";
+                g << "G1 Y" << num(-r) << "\n";
+                title = "cerchio diametro " + show(distance) + " mm a " + show(feed / 60) + " mm/s x" + std::to_string(repeats);
+            } else if (kind == "stream") {
+                need[axis[0] - 'X'] = distance;
+                const int count = static_cast<int>(distance / segment);
+                if (count < 1 || count * repeats > 400000) return reply(false, "test: too many segments");
+                for (int i = 0; i < repeats; ++i) {
+                    for (int k = 0; k < count; ++k) g << "G1 " << axis << num(segment) << (k == 0 ? " F" + num(feed) : "") << "\n";
+                    for (int k = 0; k < count; ++k) g << "G1 " << axis << num(-segment) << "\n";
+                }
+                title = "flusso di segmenti da " + show(segment) + " mm su " + axis + " (" + std::to_string(count * 2 * repeats) + " movimenti)";
+            } else if (kind == "extrude") {
+                g << "G1 E" << num(distance) << " F" << num(std::min(feed, 600.0)) << "\n";
+                title = "estrusione " + show(distance) + " mm";
+            } else {
+                return reply(false, "test: unknown kind (shuttle, ladder, square, circle, stream, extrude)");
+            }
+
+            const double room[3] = {settings_.number("volume_x") - x, settings_.number("volume_y") - y,
+                                    settings_.number("volume_z") - z};
+            const char *names = "XYZ";
+            const double whole[3] = {settings_.number("volume_x"), settings_.number("volume_y"),
+                                     settings_.number("volume_z")};
+            for (int a = 0; a < 3; ++a) {
+                if (need[a] > whole[a] + 0.001) {
+                    return reply(false, std::string("test: longer than the whole travel of ") + names[a]);
+                }
+            }
+            // Senza homing il firmware non conosce i limiti di corsa: serve un consenso esplicito
+            if (!referenced && params.find("force") == params.end()) {
+                return reply(false, "test: the position is not referenced (home first): the travel limits cannot be "
+                                    "checked. Add force=1 to run it anyway.", "\"needsForce\":true");
+            }
+            for (int a = 0; a < 3; ++a) {
+                if (referenced && need[a] > room[a] + 0.001) {
+                    return reply(false, std::string("test: not enough travel on ") + names[a] + " (needs " +
+                                        num(need[a]) + " mm, " + num(std::max(0.0, room[a])) + " mm left from here)");
+                }
+            }
+
+            std::filesystem::create_directories(std::filesystem::path(dataDir_) / "tests");
+            const auto path = std::filesystem::path(dataDir_) / "tests" /
+                              (kind + "_" + std::to_string(std::time(nullptr)) + ".gcode");
+            {
+                std::ofstream out(path);
+                // ";START" dice all'anteprima da dove parte il percorso (i movimenti sono relativi)
+                out << ";START X" << num(x) << " Y" << num(y) << " Z" << num(z) << "\n; Test: " << title
+                    << "\nG91\n" << g.str() << "G90\n";
+                if (!out.good()) return reply(false, "cannot write " + path.string());
+            }
+            Params job;
+            job["file"] = path.generic_string();
+            job["name"] = "Test: " + title;
+            job["force"] = "1"; // movimenti relativi: il controllo del volume e' quello fatto qui sopra
+            const std::string started = print(job);
+            if (!referenced && started.find("\"ok\":true") != std::string::npos) {
+                event("warn", "posizione non riferita: i limiti di corsa non sono stati controllati");
+            }
+            return started;
+        }
 
         /// Dopo i movimenti manuali il firmware resta in Printing: homing e stampe partono da Idle.
         void toIdle() {
@@ -379,8 +719,7 @@ namespace {
                                  std::to_string(std::time(nullptr)) + ".gcode");
             const auto sliced = local::slice(it->second, output.generic_string(), options);
             if (!sliced.ok) return reply(false, sliced.message, "\"log\":" + quote(sliced.log));
-            const auto report = translator::gcode::checkFile(sliced.gcodePath, local::VOLUME_X, local::VOLUME_Y,
-                                                             local::VOLUME_Z);
+            const auto report = checkFile(sliced.gcodePath);
             return reply(report.printable(), report.printable() ? "sliced" : "sliced, but not printable",
                          "\"path\":" + quote(sliced.gcodePath) + ",\"source\":" + quote(it->second) +
                          ",\"slicer\":" + quote(sliced.parameters) + ",\"report\":" + local::reportJson(report));
@@ -392,8 +731,7 @@ namespace {
             if (isActive(manager_->getCurrentState())) return reply(false, "a print is already active");
 
             // Un file che uscirebbe dal volume o usa comandi incompatibili non parte (force=1 per insistere)
-            const auto report = translator::gcode::checkFile(it->second, local::VOLUME_X, local::VOLUME_Y,
-                                                             local::VOLUME_Z);
+            const auto report = checkFile(it->second);
             if (!report.printable() && params.find("force") == params.end()) {
                 return reply(false, "the file did not pass the check (add force=1 to print anyway)",
                              "\"report\":" + local::reportJson(report));
@@ -418,10 +756,22 @@ namespace {
 
             if (!manager_->startPrintJob(it->second, record.jobId)) return reply(false, "the print could not start");
             history_.add(record);
+            const bool isTest = record.name.rfind("Test: ", 0) == 0;
+            if (!isTest) {
+                for (const auto &warning: report.warnings) history_.addEvent(record.jobId, "info", warning);
+            }
+            const auto wire = wire_->live();
+            wire_->takeErrors(); // quelli di prima non riguardano questo lavoro
             {
                 std::lock_guard<std::mutex> lock(cacheMutex_);
+                activeTest_ = isTest;
+                jobResent_ = wire.resent;
+                jobErrors_ = wire.errors;
+                jobFrames_ = wire.framesTx;
                 activeJob_ = record.jobId;
                 activeName_ = record.name;
+                activePath_ = std::filesystem::path(it->second).generic_string();
+                activeStart_ = std::time(nullptr);
             }
             return reply(true, "print started", "\"jobId\":" + quote(record.jobId));
         }
@@ -439,8 +789,27 @@ namespace {
                     std::lock_guard<std::mutex> lock(cacheMutex_);
                     job = activeJob_;
                 }
+                // cio' che la scheda ha rifiutato o segnalato, e le ritrasmissioni, finiscono nello storico
+                if (!job.empty()) {
+                    int kept = 0;
+                    for (const std::string &line: wire_->takeErrors()) {
+                        if (++kept <= 20) history_.addEvent(job, "warn", "dal firmware: " + line);
+                    }
+                    const auto wire = wire_->live();
+                    if (wire.resent > jobResent_) {
+                        history_.addEvent(job, "warn", std::to_string(wire.resent - jobResent_) + " movimenti ritrasmessi");
+                        jobResent_ = wire.resent;
+                    }
+                    if (driver_->faultEpoch() != seenFault) {
+                        history_.addEvent(job, "error", "guasto: " + driver_->lastFaultReason());
+                    }
+                }
                 if (!job.empty() && !printing &&
                     (state == JobState::COMPLETED || state == JobState::FAILED || state == JobState::CANCELLED)) {
+                    const auto wire = wire_->live();
+                    history_.addEvent(job, "info", "collegamento: " + std::to_string(wire.framesTx - jobFrames_) +
+                                                   " movimenti inviati, " + std::to_string(wire.errors - jobErrors_) +
+                                                   " risposte di errore");
                     const auto info = core::jobs::JobTracker::getInstance().getJobInfo(job);
                     // Il motivo vero e' quello del guasto che ha fermato il job, non il generico "Job failed"
                     std::string error = info ? info->error : "";
@@ -452,6 +821,7 @@ namespace {
                     lastResult_ = activeName_ + ": " + jobStateName(state) + (error.empty() ? "" : " - " + error);
                     activeJob_.clear();
                     activeName_.clear();
+                    activePath_.clear();
                 }
 
                 // --- temperatura: un comando ogni 2 s, anche in stampa ---
@@ -507,13 +877,15 @@ namespace {
     };
 
     // ------------------------------------------------------------------ server HTTP
-    int serve(const std::string &device, int httpPort, const std::string &dataDir) {
+    int serve(const std::string &device, int httpPort, const std::string &dataDir, double simSpeed) {
         std::filesystem::create_directories(std::filesystem::path(dataDir) / "gcode");
         Logger::init();
-        Service service(device, dataDir);
+        Service service(device, dataDir, simSpeed);
         std::string error;
         if (!service.start(error)) {
             std::cerr << "3dp: " << error << std::endl;
+            service.stop();
+            Logger::shutdown();
             return 1;
         }
 
@@ -523,6 +895,16 @@ namespace {
         });
         server.Get("/api/status", [&](const httplib::Request &, httplib::Response &res) {
             res.set_content(service.status(), "application/json");
+        });
+        server.Get("/api/config", [&](const httplib::Request &, httplib::Response &res) {
+            res.set_content(service.command("config", {}, ""), "application/json");
+        });
+        server.Get("/api/live", [&](const httplib::Request &req, httplib::Response &res) {
+            const uint64_t after = req.has_param("after") ? std::strtoull(req.get_param_value("after").c_str(), nullptr, 10) : 0;
+            res.set_content(service.live(after), "application/json");
+        });
+        server.Get("/api/preview", [&](const httplib::Request &req, httplib::Response &res) {
+            res.set_content(service.preview(req.get_param_value("file")), "application/json");
         });
         server.Get("/api/history", [&](const httplib::Request &req, httplib::Response &res) {
             const int limit = req.has_param("limit") ? std::atoi(req.get_param_value("limit").c_str()) : 50;
@@ -535,7 +917,7 @@ namespace {
         });
         server.set_payload_max_length(512 * 1024 * 1024); // i G-code grandi arrivano dalla pagina
 
-        std::cout << "3dp: printer on " << device << ", page and API on http://127.0.0.1:" << httpPort << std::endl;
+        std::cout << "3dp: " << (device.empty() ? "SIMULATED printer" : "printer on " + device) << ", page and API on http://127.0.0.1:" << httpPort << std::endl;
         // Solo localhost: l'API muove una macchina e non ha autenticazione
         const bool ok = server.listen("127.0.0.1", httpPort);
         service.stop();
@@ -601,10 +983,15 @@ namespace {
         std::cout <<
                   "3dp - local 3D printer service\n\n"
                   "  3dp serve --port <device> [--http 7333] [--data ./3dp-data]\n"
+                  "  3dp serve --sim [--speed 12]   simulated printer (firmware built for the PC), no hardware\n"
                   "  3dp status | history | diag\n"
                   "  3dp home [XYZ]            3dp jog x=10 y=-5 z=1 e=2 f=3000\n"
                   "  3dp temp <degrees>        3dp fan <percent>\n"
                   "  3dp advance <K>           linear advance in seconds, 0 = off (same as M900 K)\n"
+                  "  3dp config [key=value ...]  show or change the configuration (3dp-data/config.ini)\n"
+                  "  3dp test kind=shuttle|ladder|square|circle|stream|extrude [axis=x distance=50 feed=3000\n"
+                  "                            feed2=4800 repeats=3 segment=0.1]   motion tests, run as jobs\n"
+                  "  3dp endstops              endstop switches, read now\n"
                   "  3dp gcode \"G1 X10 F3000\"\n"
                   "  3dp upload <file.gcode>   3dp print <file.gcode> [name=...] [force=1]\n"
                   "  3dp check <file.gcode>    what the driver would do with the file (no printer needed)\n"
@@ -619,6 +1006,8 @@ int main(int argc, char **argv) {
     std::vector<std::string> arguments(argv + 1, argv + argc);
     std::string device, dataDir = "3dp-data";
     int httpPort = 7333;
+    bool simulated = false;
+    double simSpeed = 1.0;
 
     std::vector<std::string> rest;
     for (size_t i = 0; i < arguments.size(); ++i) {
@@ -626,6 +1015,8 @@ int main(int argc, char **argv) {
         if (a == "--port" && i + 1 < arguments.size()) device = arguments[++i];
         else if (a == "--http" && i + 1 < arguments.size()) httpPort = std::atoi(arguments[++i].c_str());
         else if (a == "--data" && i + 1 < arguments.size()) dataDir = arguments[++i];
+        else if (a == "--sim") simulated = true;
+        else if (a == "--speed" && i + 1 < arguments.size()) simSpeed = std::atof(arguments[++i].c_str());
         else rest.push_back(a);
     }
 
@@ -642,7 +1033,9 @@ int main(int argc, char **argv) {
         }
         const auto report = translator::gcode::checkFile(commandArguments[0], local::VOLUME_X, local::VOLUME_Y,
                                                          local::VOLUME_Z);
-        std::cout << local::reportJson(report) << std::endl;
+        const auto estimate = translator::gcode::buildPreview(commandArguments[0], core::planning::MachineLimits{}, 0.0);
+        std::cout << "{\"report\":" << local::reportJson(report) << ",\"estimatedSeconds\":"
+                  << number(estimate.seconds(), 0) << ",\"heatWaits\":" << estimate.heatWaits << "}" << std::endl;
         return report.printable() ? 0 : 1;
     }
     if (rest[0] == "slice") {
@@ -672,11 +1065,20 @@ int main(int argc, char **argv) {
         return report.printable() ? 0 : 1;
     }
     if (rest[0] == "serve") {
+        if (simulated) {
+            if (!local::simAvailable()) {
+                std::cerr << "3dp serve: this build has no simulator (build it with: tools/build_local.sh --sim)"
+                          << std::endl;
+                return 2;
+            }
+            // dati separati da quelli della macchina vera
+            return serve("", httpPort, dataDir == "3dp-data" ? "3dp-data-sim" : dataDir, simSpeed > 0 ? simSpeed : 1.0);
+        }
         if (device.empty()) {
-            std::cerr << "3dp serve: missing --port <device> (e.g. COM3 or /dev/ttyUSB0)" << std::endl;
+            std::cerr << "3dp serve: missing --port <device> (e.g. COM3 or /dev/ttyUSB0), or --sim" << std::endl;
             return 2;
         }
-        return serve(device, httpPort, dataDir);
+        return serve(device, httpPort, dataDir, 1.0);
     }
     return client(httpPort, rest[0], std::vector<std::string>(rest.begin() + 1, rest.end()));
 }
