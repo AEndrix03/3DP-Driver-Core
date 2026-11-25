@@ -309,7 +309,9 @@ namespace {
             out << "},\"moving\":" << (moving ? "true" : "false")
                 << ",\"speed\":" << number(moving ? wire.speed : 0.0, 2)
                 << ",\"acceleration\":" << number(moving ? wire.acceleration : 0.0, 0)
-                << ",\"queued\":" << wire.queued << ",\"queueSize\":" << limits.queueBlocks
+                // inviati e non ancora eseguiti: quelli nella coda della scheda piu' quelli ancora in viaggio
+                << ",\"queued\":" << wire.queued << ",\"queueSize\":"
+                << limits.queueBlocks + static_cast<int>(core::CommandExecutor::WINDOW_FRAMES)
                 << ",\"link\":{\"framesTx\":" << wire.framesTx << ",\"acksRx\":" << wire.acksRx
                 << ",\"textTx\":" << wire.textTx << ",\"textRx\":" << wire.textRx
                 << ",\"bytesTx\":" << wire.bytesTx << ",\"bytesRx\":" << wire.bytesRx
@@ -734,6 +736,52 @@ namespace {
                          ",\"report\":" + local::reportJson(report));
         }
 
+        /**
+         * Prova a secco: copia del file senza i comandi che scaldano l'ugello e, se `keepExtruder`
+         * e' falso, senza estrusione. Restano tutti i movimenti, con le stesse velocita': serve a
+         * provare meccanica e motori prima che ci sia un hotend (o senza consumare filamento).
+         * @return percorso della copia, "" se non si riesce a scriverla
+         */
+        std::string dryCopy(const std::string &source, bool keepExtruder) {
+            std::ifstream in(source);
+            const auto target = std::filesystem::path(dataDir_) / "gcode" /
+                                (std::filesystem::path(source).stem().string() + (keepExtruder ? ".secco-e" : ".secco") +
+                                 ".gcode");
+            std::ofstream out(target);
+            if (!in.is_open() || !out.is_open()) return "";
+            std::string line;
+            while (std::getline(in, line)) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                const std::string command = translator::gcode::commandOf(line);
+                if (command == "M104" || command == "M109" || command == "M140" || command == "M190") {
+                    out << "; a secco: " << line << "\n"; // resta come commento: le righe del file non cambiano numero
+                    continue;
+                }
+                const bool move = command == "G0" || command == "G1" || command == "G2" || command == "G3" ||
+                                  command == "G5";
+                if (keepExtruder || !move) {
+                    out << line << "\n";
+                    continue;
+                }
+                // via il parametro E: il movimento resta identico, l'estrusore sta fermo
+                const size_t comment = line.find(';');
+                std::istringstream tokens(line.substr(0, comment));
+                std::string token, kept;
+                int parameters = 0;
+                while (tokens >> token) {
+                    if (kept.empty()) {
+                        kept = token; // il comando
+                    } else if (token[0] != 'E' && token[0] != 'e') {
+                        kept += " " + token;
+                        ++parameters;
+                    }
+                }
+                if (parameters == 0) out << "; a secco: " << line << "\n"; // era solo estrusione (ritrazione, spurgo)
+                else out << kept << "\n";
+            }
+            return out.good() ? target.generic_string() : "";
+        }
+
         std::string print(const Params &params) {
             const auto it = params.find("file");
             if (it == params.end() || !std::filesystem::exists(it->second)) return reply(false, "file not found");
@@ -745,26 +793,40 @@ namespace {
                 return reply(false, "the file did not pass the check (add force=1 to print anyway)",
                              "\"report\":" + local::reportJson(report));
             }
+            // dry=heat: non scalda, l'estrusore gira; dry=motion: non scalda e l'estrusore sta fermo
+            std::string runPath = it->second, dryNote;
+            if (const auto dry = params.find("dry"); dry != params.end() && !dry->second.empty() && dry->second != "0") {
+                if (dry->second != "heat" && dry->second != "motion") return reply(false, "dry must be heat or motion");
+                runPath = dryCopy(it->second, dry->second == "heat");
+                if (runPath.empty()) return reply(false, "cannot write the dry-run copy of the file");
+                dryNote = dry->second == "heat" ? " (a secco)" : " (a secco, solo assi)";
+            }
             toIdle();
 
             local::PrintRecord record;
             record.jobId = "local-" + std::to_string(std::time(nullptr));
             const auto name = params.find("name");
-            record.name = name != params.end() ? name->second : std::filesystem::path(it->second).filename().string();
-            record.gcodePath = it->second;
+            record.name = (name != params.end() ? name->second : std::filesystem::path(it->second).filename().string()) +
+                          dryNote;
+            record.gcodePath = runPath;
             const auto source = params.find("source");
             if (source != params.end()) record.sourcePath = source->second;
             const auto slicer = params.find("slicer");
             if (slicer != params.end()) record.slicerParams = slicer->second;
             record.state = "RUNNING";
             {
-                std::ifstream file(it->second);
+                std::ifstream file(runPath);
                 std::string line;
                 while (std::getline(file, line)) ++record.lines;
             }
 
-            if (!manager_->startPrintJob(it->second, record.jobId)) return reply(false, "the print could not start");
+            if (!manager_->startPrintJob(runPath, record.jobId)) return reply(false, "the print could not start");
             history_.add(record);
+            if (!dryNote.empty()) {
+                history_.addEvent(record.jobId, "info", dryNote == " (a secco)"
+                                                        ? "prova a secco: riscaldamento tolto, estrusore in movimento"
+                                                        : "prova a secco: riscaldamento ed estrusione tolti, solo X Y Z");
+            }
             const bool isTest = record.name.rfind("Test: ", 0) == 0;
             if (!isTest) {
                 for (const auto &warning: report.warnings) history_.addEvent(record.jobId, "info", warning);
@@ -779,7 +841,7 @@ namespace {
                 jobFrames_ = wire.framesTx;
                 activeJob_ = record.jobId;
                 activeName_ = record.name;
-                activePath_ = std::filesystem::path(it->second).generic_string();
+                activePath_ = std::filesystem::path(runPath).generic_string();
                 activeStart_ = std::time(nullptr);
             }
             return reply(true, "print started", "\"jobId\":" + quote(record.jobId));
@@ -1006,6 +1068,7 @@ namespace {
                   "  3dp endstops              endstop switches, read now\n"
                   "  3dp gcode \"G1 X10 F3000\"\n"
                   "  3dp upload <file.gcode>   3dp print <file.gcode> [name=...] [force=1]\n"
+                  "                            [dry=heat|motion]  dry run: no heating; motion = extruder still too\n"
                   "  3dp check <file.gcode>    what the driver would do with the file (no printer needed)\n"
                   "  3dp slice <model.stl> [out=...] [layer=0.2 infill=20 temp=205 perimeters=2 speed=45\n"
                   "                                   supports=0 brim=0]   (PrusaSlicer, no printer needed)\n"

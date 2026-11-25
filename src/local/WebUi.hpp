@@ -261,7 +261,7 @@ td.wide { white-space:normal; color:var(--muted); }
       <div class="tele" aria-label="Valori letti dalla macchina">
         <div><span>Posizione reale</span><b id="tPos">-</b></div>
         <div><span>Velocit&agrave;</span><b id="tSpeed">-</b></div>
-        <div><span>Coda del firmware</span><b id="tQueue">-</b><div class="meter"><i id="tQueueBar"></i></div></div>
+        <div title="Movimenti inviati e non ancora eseguiti: quelli in coda nella scheda piu' quelli in viaggio sulla seriale"><span>Inviati, da eseguire</span><b id="tQueue">-</b><div class="meter"><i id="tQueueBar"></i></div></div>
         <div><span>Movimenti inviati</span><b id="tRate">-</b></div>
         <div><span>Linea</span><b id="tBytes">-</b></div>
         <div><span>Ritrasmessi / errori</span><b id="tErr">-</b></div>
@@ -319,7 +319,13 @@ td.wide { white-space:normal; color:var(--muted); }
       </div>
       <div id="slicerNote" class="note" hidden>Slicer non trovato: i modelli non si possono affettare (i G-code s&igrave;). Installa PrusaSlicer oppure indica il suo percorso in Configurazione, Slicer.</div>
       <div id="report">I parametri valgono per i modelli: vengono affettati con il profilo della macchina. Un G-code viene solo controllato.</div>
-      <div class="row" style="margin-top:10px"><button class="btn primary" id="startBtn" style="flex:1" disabled onclick="startPrint()">Avvia stampa</button></div>
+      <div class="row" style="margin-top:10px">
+        <select id="dry" aria-label="Tipo di esecuzione" title="A secco: per provare la meccanica senza hotend o senza consumare filamento">
+          <option value="">Stampa vera</option>
+          <option value="motion">A secco: solo assi X Y Z</option>
+          <option value="heat">A secco: assi ed estrusore, senza scaldare</option>
+        </select>
+        <button class="btn primary" id="startBtn" style="flex:1" disabled onclick="startPrint()">Avvia</button></div>
       <details><summary>File gi&agrave; sul computer</summary><div class="row">
         <input id="path" type="text" placeholder="percorso del G-code" style="flex:1"><button class="btn" onclick="prepare(val('path'), val('path').split(/[\\/]/).pop(), '')">Apri</button></div></details>
     </div>
@@ -542,7 +548,8 @@ const drop = $('drop');
 drop.addEventListener('drop', e => handleFile(e.dataTransfer.files[0]));
 async function startPrint() {
   if (!ready) return;
-  const started = await api('print', 'file=' + encodeURIComponent(ready.path) + '&name=' + encodeURIComponent(ready.name) + ready.extra);
+  const started = await api('print', 'file=' + encodeURIComponent(ready.path) + '&name=' + encodeURIComponent(ready.name) + ready.extra
+    + (val('dry') ? '&dry=' + val('dry') : ''));
   if (started && started.ok) { $('startBtn').disabled = true; playing = false; }
   else if (started) setReport(started.message, true);
 }

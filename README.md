@@ -140,6 +140,20 @@ La stessa "spia" sulla seriale tiene la traccia degli ultimi scambi: per ogni fr
 byte e la traduzione (`MOVE #12 X160 Y-8 E5 V60 A1000 S..J..`), per ogni risposta il testo o
 `ACK #12, 3 da completare`.
 
+### Prova a secco
+
+Per provare meccanica e motori con un pezzo vero, prima che ci sia un hotend o senza consumare
+filamento: nella scheda Controllo si sceglie "A secco" prima di avviare, oppure
+`3dp print file.gcode dry=motion`. Il servizio stampa una copia del file (`*.secco.gcode`, accanto
+all'originale nello spazio dei dati):
+
+- `dry=motion`: tolti riscaldamento ed estrusione, si muovono solo X, Y e Z;
+- `dry=heat`: tolto solo il riscaldamento, l'estrusore gira (da non usare con filamento caricato
+  e ugello freddo; se il termistore e' attivo il firmware rifiuta comunque l'estrusione a freddo).
+
+Percorso, velocita' e accelerazioni sono quelli della stampa vera. Senza termistore una stampa
+normale si ferma subito (`NO_SENSOR`): e' la prova a secco quella da usare.
+
 ### Regolare la velocita'
 
 Due leve, nella scheda Controllo e in Configurazione, modificabili anche a lavoro in corso:
