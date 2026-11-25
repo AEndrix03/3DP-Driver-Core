@@ -53,6 +53,10 @@ jobs:
           test -n "$ok"
           grep -q '"sim":{' status.json
           ./build-local/3dp home --http 7444
+          # dopo un homing la posizione mostrata dalla pagina e' quella nuova, non quella di prima
+          ./build-local/3dp jog x=30 f=6000 --http 7444
+          ./build-local/3dp home --http 7444
+          curl -s http://127.0.0.1:7444/api/live | tee live.json | grep -q '"x":1.250'
           # una misura automatica dall'inizio alla fine: homing ripetuti, scarto zero sul simulatore
           ./build-local/3dp measure kind=repeat axis=x n=3 --http 7444
           for i in $(seq 1 60); do

@@ -139,6 +139,7 @@ namespace core::command::motion {
         {
             std::lock_guard<std::mutex> sentLock(sentMutex_);
             sent_.valid = true;
+            sent_.epoch = epoch;
             for (int a = 0; a < 3; ++a) sent_.steps[a] = mirror_.position[a];
             for (int a = 0; a < 4; ++a) sent_.stepsPerMm[a] = mirror_.stepsPerMm[a];
         }

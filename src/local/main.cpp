@@ -308,15 +308,22 @@ namespace {
             const auto sent = driver_->motion()->sentPosition();
             const auto limits = driver_->motion()->plannerLimits();
             const bool moving = wire.queued > 0;
+            // Homing, M12 e arresti spostano la posizione senza movimenti del driver: finche' il driver
+            // non la rilegge, vale quella chiesta al firmware (M114) dal giro di lettura.
+            const bool current = sent.valid && sent.epoch == driver_->positionEpoch();
 
             std::ostringstream out;
-            out << "{\"ok\":true,\"exec\":{\"known\":" << (sent.valid ? "true" : "false");
-            if (sent.valid) {
-                const char *names[3] = {"x", "y", "z"};
+            const char *names[3] = {"x", "y", "z"};
+            if (current) {
+                out << "{\"ok\":true,\"exec\":{\"known\":true";
                 for (int a = 0; a < 3; ++a) {
                     out << ",\"" << names[a] << "\":"
                         << number(static_cast<double>(sent.steps[a] - wire.outstanding[a]) / sent.stepsPerMm[a]);
                 }
+            } else {
+                std::lock_guard<std::mutex> lock(cacheMutex_);
+                out << "{\"ok\":true,\"exec\":{\"known\":" << (posKnown_ ? "true" : "false");
+                if (posKnown_) out << ",\"x\":" << number(posX_) << ",\"y\":" << number(posY_) << ",\"z\":" << number(posZ_);
             }
             out << "},\"moving\":" << (moving ? "true" : "false")
                 << ",\"speed\":" << number(moving ? wire.speed : 0.0, 2)
@@ -478,7 +485,9 @@ namespace {
             if (name == "home") {
                 toIdle();
                 const auto it = params.find("axes");
-                return reply(driver_->system()->homeAxes(it != params.end() ? it->second : ""));
+                const auto homed = driver_->system()->homeAxes(it != params.end() ? it->second : "");
+                refreshPosition(); // la pagina vede subito la posizione nuova, non al prossimo giro di lettura
+                return reply(homed);
             }
             if (name == "jog") {
                 core::command::motion::MoveTarget target;
@@ -903,6 +912,19 @@ namespace {
                 activeStart_ = std::time(nullptr);
             }
             return reply(true, "print started", "\"jobId\":" + quote(record.jobId));
+        }
+
+        /// Posizione chiesta adesso al firmware (M114), per la pagina.
+        void refreshPosition() {
+            bool referenced = false;
+            const auto position = driver_->motion()->getPosition(&referenced);
+            std::lock_guard<std::mutex> lock(cacheMutex_);
+            posKnown_ = position.has_value();
+            if (!position) return;
+            posReferenced_ = referenced;
+            posX_ = position->x;
+            posY_ = position->y;
+            posZ_ = position->z;
         }
 
         /// Aggiorna temperatura, posizione, guasti e chiude nello storico le stampe terminate.

@@ -89,6 +89,10 @@ namespace core::command::motion {
         /// meno i movimenti inviati e non ancora eseguiti.
         struct SentPosition {
             bool valid = false;
+            /// DriverInterface::positionEpoch() quando la posizione e' stata letta dal firmware. Se nel
+            /// frattempo e' cambiata (homing, M12, arresto), la posizione si e' spostata senza movimenti
+            /// del driver e questa non vale piu': va chiesta al firmware (M114).
+            uint64_t epoch = 0;
             long long steps[3] = {0, 0, 0};
             double stepsPerMm[4] = {0, 0, 0, 0};
         };
