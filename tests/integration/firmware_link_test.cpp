@@ -25,6 +25,7 @@
 #include "translator/dispatchers/compat/CompatibilityDispatcher.hpp"
 #include "translator/GCodeSupport.hpp"
 #include "translator/GCodePreview.hpp"
+#include "../../src/local/MeasureMath.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -1975,6 +1976,88 @@ static void testReadableWhileMoving() {
     std::filesystem::remove_all(core::print::JobCheckpoint::directory(), ec);
 }
 
+static void testHomingMeasuresLostSteps() {
+    // L'homing dice dove il firmware credeva di essere al contatto: su un asse gia' riferito e'
+    // il numero di step che la meccanica ha perso. E' la base di tutte le misure automatiche.
+    prepareMachine();
+    sim::setTimeScale(8.0);
+    auto result = driver->system()->homing();
+    CHECK_MSG(result.isSuccess(), result.message);
+
+    const auto away = [&](double x) {
+        CHECK(driver->system()->startPrint().isSuccess());
+        CHECK(driver->motion()->moveAbsolute({x, std::nullopt, std::nullopt, std::nullopt, 4800.0}).isSuccess());
+        CHECK(idle());
+        CHECK(driver->system()->endPrint().isSuccess());
+    };
+
+    // nessuno step perso: il finecorsa scatta esattamente a zero
+    away(30.0);
+    auto homing = local::measure::parseHoming(driver->system()->homeAxes("X").body);
+    CHECK(homing.done[0] && homing.offset[0].has_value());
+    CHECK_MSG(homing.offset[0].value_or(99) == 0, "offset " + std::to_string(homing.offset[0].value_or(99)));
+    CHECK(!homing.done[1] && !homing.offset[1].has_value()); // Y non e' stato chiesto
+
+    // finecorsa 7 step piu' in alto = carrello rimasto indietro di 7 step: il contatto arriva in anticipo
+    away(30.0);
+    sim::setEndstop(0, -800 + 7);
+    homing = local::measure::parseHoming(driver->system()->homeAxes("X").body);
+    CHECK_MSG(homing.offset[0].value_or(99) == 7, "offset " + std::to_string(homing.offset[0].value_or(99)));
+
+    // dopo l'homing lo zero e' quello nuovo: rimesso il finecorsa al suo posto, la differenza e' -7
+    away(30.0);
+    sim::setEndstop(0, -800);
+    homing = local::measure::parseHoming(driver->system()->homeAxes("X").body);
+    CHECK_MSG(homing.offset[0].value_or(99) == -7, "offset " + std::to_string(homing.offset[0].value_or(99)));
+
+    // da non riferito (dopo un arresto di emergenza) non c'e' nulla da confrontare: nessun numero
+    CHECK(driver->motion()->emergencyStop().isSuccess());
+    CHECK(driver->system()->clearError().isSuccess());
+    result = driver->system()->homing();
+    CHECK_MSG(result.isSuccess(), result.message);
+    homing = local::measure::parseHoming(result.body);
+    CHECK(homing.done[0] && homing.done[1] && homing.done[2]);
+    CHECK(!homing.offset[0].has_value() && !homing.offset[1].has_value() && !homing.offset[2].has_value());
+    CHECK(sim::steps().x == -700 && sim::steps().y == -700);
+}
+
+static void testMeasureMath() {
+    using namespace local::measure;
+    const auto s = stats({1.0, 2.0, 3.0, 4.0});
+    CHECK(s.count == 4 && std::fabs(s.mean - 2.5) < 1e-9 && std::fabs(s.deviation - 1.2909944) < 1e-6);
+    CHECK(s.min == 1.0 && s.max == 4.0);
+    CHECK(stats({}).count == 0);
+
+    // righe come arrivano dalla scheda, con il checksum in coda
+    auto homing = parseHoming({"HOM X START *12", "HOM X OK -3 *77", "HOM Y SKIP *5", "HOM Z FAIL *9"});
+    CHECK(homing.done[0] && homing.offset[0].value_or(0) == -3);
+    CHECK(homing.skipped[1] && !homing.done[1] && homing.failed[2]);
+    homing = parseHoming({"HOM X OK *77"}); // firmware precedente: nessuna misura
+    CHECK(homing.done[0] && !homing.offset[0].has_value());
+
+    const auto health = parseHealth({"DIA 120 1 5521 2 0 1 812 *40", "PRF 640 64 3 1 *12"});
+    CHECK(health.valid && health.checksumErrors == 2 && health.lostAcks == 1);
+    CHECK(health.freeRamMin == 640 && health.stepInterruptMaxUs == 64 && health.missedDeadlines == 3 && health.uartErrors == 1);
+    CHECK(!parseHealth({"DIA 120 1 5521 2 0 1 812"}).valid);
+
+    CHECK(std::fabs(peakSpeed(80.0, 1000.0, 100.0) - 80.0) < 1e-9); // tratto lungo: si arriva alla velocita' chiesta
+    CHECK(std::fabs(peakSpeed(80.0, 1000.0, 4.0) - 63.2455) < 1e-3); // tratto corto: non si fa in tempo
+
+    // Hotend di prova: fermo per 5 s (ritardo), poi sale a 2 gradi/s. La regola deve ritrovare i due numeri.
+    std::vector<TempSample> curve;
+    for (double t = 0.0; t <= 120.0; t += 0.5) curve.push_back({t, 25.0 + std::max(0.0, t - 5.0) * 2.0});
+    const auto pid = tuneFromRise(curve, 190.0);
+    CHECK_MSG(pid.valid, pid.why);
+    CHECK_MSG(std::fabs(pid.rate - 2.0) < 0.05, "rate " + std::to_string(pid.rate));
+    CHECK_MSG(std::fabs(pid.deadTime - 5.0) < 0.5, "dead time " + std::to_string(pid.deadTime));
+    CHECK(pid.kp > 5.0 && pid.kp < 60.0 && pid.ki > 0.0 && pid.kd > 0.0);
+    // partendo gia' caldi non c'e' abbastanza salita a piena potenza: nessuna proposta, e si dice perche'
+    std::vector<TempSample> warm;
+    for (double t = 0.0; t <= 20.0; t += 0.5) warm.push_back({t, 170.0 + t});
+    const auto none = tuneFromRise(warm, 190.0);
+    CHECK(!none.valid && !none.why.empty());
+}
+
 static void testCancelJob() {
     prepareMachine();
     const std::string path = writePrintFile();
@@ -2054,6 +2137,8 @@ int main(int argc, char **argv) {
             {"recover after firmware reboot",      testRecoverAfterFirmwareReboot},
             {"end g-code and checkpoint file",     testEndGCodeAndCheckpointFile},
             {"cancel job",                         testCancelJob},
+            {"homing measures lost steps",         testHomingMeasuresLostSteps},
+            {"measurement maths",                  testMeasureMath},
             {"state readable while moving",        testReadableWhileMoving},
     };
 

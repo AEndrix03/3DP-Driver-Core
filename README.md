@@ -77,6 +77,9 @@ tools/build_local.sh                       # servono solo g++ e SQLite (libsqlit
 build-local/3dp serve --port /dev/ttyUSB0  # su Windows: --port COM3
 ```
 
+Su Linux, dall'installazione dei pacchetti all'avvio automatico: [docs/LINUX.md](docs/LINUX.md).
+Un indirizzo con `#tests`, `#config` o `#history` apre direttamente quella scheda.
+
 - **Servizio**: tiene la porta seriale, esegue le stampe, salva lo storico in
   `3dp-data/history.sqlite` e i G-code in `3dp-data/gcode/`.
 - **Pagina di gestione**: `http://127.0.0.1:7333`, quattro schede.
@@ -84,7 +87,8 @@ build-local/3dp serve --port /dev/ttyUSB0  # su Windows: --port COM3
     i valori letti dalla macchina (posizione eseguita, velocita', coda del firmware, movimenti al
     secondo, ritrasmissioni) e la traccia della seriale. A lato: lavoro in corso, file, ugello,
     movimento manuale.
-  - *Test*: prove di movimento eseguite dal driver (vedi "Test").
+  - *Test*: misure automatiche, stress test e prove di movimento (vedi "Misure automatiche e
+    stress test" e "Test").
   - *Configurazione*: i valori scelti dall'operatore, salvati in `3dp-data/config.ini`.
   - *Storico*: i lavori fatti, con gli errori e gli avvisi capitati durante ciascuno.
 - **Modalita'**, indicata in alto: *Simulazione* (stampante simulata), *Pronta* (macchina vera
@@ -106,6 +110,7 @@ build-local/3dp serve --port /dev/ttyUSB0  # su Windows: --port COM3
 | `3dp slice modello.stl [layer=0.2 infill=20 temp=205 perimeters=2 speed=45 supports=0 brim=0]` | affetta il modello con PrusaSlicer e controlla il risultato, senza stampante |
 | `3dp config [chiave=valore ...]` | mostra o cambia la configurazione |
 | `3dp test kind=shuttle axis=x distance=50 feed=3000 repeats=5` | prova di movimento (vedi "Test") |
+| `3dp measure kind=speed axis=x` | misura automatica o stress test (vedi "Misure automatiche e stress test") |
 | `3dp endstops` | stato dei finecorsa |
 | `3dp pause` / `resume` / `cancel` / `clear` | controllo della stampa, azzeramento errore |
 | `3dp estop` | arresto di emergenza: ferma i motori e spegne l'heater |
@@ -193,9 +198,79 @@ errori. Prima di partire il servizio controlla che ci sia corsa sufficiente.
 | `stream` | migliaia di segmenti corti: mette sotto sforzo collegamento e coda |
 | `extrude` | spinge una lunghezza nota di filamento |
 
-`3dp endstops` legge i finecorsa, `3dp diag` la diagnostica del firmware. I test dicono cosa ha
-fatto il collegamento (movimenti, ritrasmissioni, errori); se la meccanica ha perso passi lo
-si vede e lo si sente, il driver non lo misura.
+`3dp endstops` legge i finecorsa, `3dp diag` la diagnostica del firmware. Questi test muovono e
+basta: dicono cosa ha fatto il collegamento (movimenti, ritrasmissioni, errori), non se la
+meccanica ha perso passi. Per quello ci sono le misure automatiche.
+
+### Misure automatiche e stress test
+
+Scheda Test, o `3dp measure kind=...`. La macchina ha due sensori, i finecorsa e il termistore, e
+le misure usano solo quelli: nessun valore e' stimato.
+
+**Come si misura la posizione.** Dopo ogni prova si rifa' l'homing e il firmware riporta dove
+credeva di essere quando il finecorsa e' scattato (`HOM X OK <step>`, vedi `PROTOCOL.md`). Su una
+macchina che non ha perso step e' zero; altrimenti e' il numero di step persi dall'homing
+precedente. La risoluzione e' di uno step (12,5 micron con 80 step/mm); la precisione vera e'
+quella dell'interruttore, che si misura con `repeat` e va guardata per prima: uno scarto entro
+quella dispersione non e' una perdita di step. La tolleranza predefinita e' 2 step (`tol=`).
+
+| `kind` | Cosa misura | Parametri (predefiniti) |
+|--------|-------------|-------------------------|
+| `repeat` | ripetibilita' del finecorsa: media, deviazione standard, minimo-massimo su piu' contatti | `axis=x n=10` |
+| `speed` | velocita' massima: va e vieni a velocita' crescenti, homing di controllo dopo ogni gradino, si ferma al primo che perde step | `axis=x distance=100 from= to= levels=6 repeats=3` |
+| `accel` | accelerazione massima: tratti corti con molte inversioni, ad accelerazioni crescenti | `axis=x distance=20 from= to= levels=6 repeats=10` |
+| `travel` | corsa dell'asse: va piano fino al fondo dichiarato e torna | `axis=x speed=20` |
+| `tnoise` | rumore del termistore a riposo | `seconds=20` |
+| `heat` | riscaldamento: tempo per arrivare, superamento, errore e oscillazione a regime, proposta di PID | `target=<preriscaldamento> hold=60 timeout=600` |
+| `stress` | stress test della meccanica, con verifiche periodiche | `minutes=10 check=2 z=0 seed=1` |
+| `pack` | piu' misure di fila: `name=mechanics` (finecorsa, velocita', accelerazione di X e Y, 3 minuti di stress), `thermal` (sensore, riscaldamento), `all` | |
+| `steps` | step per millimetro corretti, dal valore misurato con un calibro | `axis=x commanded=100 measured=99.2` |
+
+`3dp measure` senza parametri da' lo stato o l'ultimo risultato; `3dp cancel` ferma la misura al
+movimento successivo, `3dp estop` subito. Ogni misura finisce nello storico con le sue righe. In
+fondo a ogni resoconto c'e' cio' che scheda e collegamento hanno fatto nel frattempo: scadenze
+degli step mancate, errori di ricezione, ritrasmissioni.
+
+Quando una misura trova un limite propone un valore (80% dell'ultimo gradino pulito, la corsa
+reale meno un millimetro, i tre guadagni del PID) e la pagina offre di scriverlo nella
+configurazione. Va poi ripetuta: il valore proposto e' un punto di partenza, non una garanzia.
+
+**Limiti, detti chiaramente.**
+
+- Servono i finecorsa abilitati nel firmware (`EndstopConfig.hpp`). Senza, le misure meccaniche si
+  rifiutano di partire; lo stress test puo' girare con `force=1`, ma solo come esercizio: non
+  verifica nulla e prende la posizione attuale come origine.
+- `speed` e `accel` non possono superare i massimi del firmware: trovano se i valori in uso
+  reggono, e quale valore piu' basso regge se non reggono. Un "nessuno step perso fino a 83 mm/s"
+  dice che il limite attuale e' confermato, non che sia il massimo della meccanica.
+- `speed` riporta la velocita' davvero raggiunta: su un tratto corto non si arriva a quella
+  chiesta, e la riga lo dice.
+- `travel` misura la corsa solo se quella dichiarata e' piu' lunga di quella vera: il carrello
+  arriva a battuta, il motore salta e dagli step persi si ricava la lunghezza reale, con circa un
+  millimetro di incertezza. Se la corsa dichiarata e' piu' corta dice solo "almeno". Va fatta
+  piano: e' un urto voluto.
+- Gli step per millimetro non si possono misurare senza uno strumento: `steps` fa solo il conto.
+  Sono costanti del firmware (`MotionConfig.hpp`, `ExtruderConfig.hpp`): cambiarle richiede di
+  ricaricare la scheda.
+- Il PID proposto viene dalla salita a piena potenza (ritardo e pendenza massima, regola della
+  curva di reazione con guadagno e integrale ridotti). Serve partire almeno 30 gradi sotto la
+  zona di regolazione. Sul modello termico del simulatore i guadagni proposti arrivano a 200
+  gradi senza superamento e tengono entro mezzo grado; su un hotend vero vanno verificati
+  ripetendo `heat`.
+- Niente di tutto questo e' stato provato su una meccanica vera.
+
+**Stress test.** Alterna quattro esercizi alle velocita' e accelerazioni della configurazione, su
+tutto il volume di lavoro: corse lunghe (velocita' di punta), inversioni fitte a passi da 0,5 a
+20 mm (la frequenza delle scosse cambia: e' li' che escono le risonanze), cerchi a corde da mezzo
+millimetro (migliaia di movimenti corti di fila), scatti corti in direzioni a caso (lavora solo
+l'accelerazione). La sequenza e' casuale ma ripetibile (`seed=`). Ogni `check` minuti rifa'
+l'homing: se un asse ha perso step si ferma e dice dopo quali esercizi. Con `z=1` aggiunge
+spostamenti di Z entro i primi 20 mm.
+
+**Provarle senza macchina.** Con `3dp serve --sim` le misure girano sul firmware simulato, che
+non perde step: tutto risulta zero. `3dp simfault axis=x steps=9` sposta il finecorsa simulato di
+9 step, e la misura in corso li trova come persi: serve a vedere com'e' fatto un resoconto
+fallito.
 
 ### Stampante simulata
 
@@ -269,7 +344,8 @@ Il piano di velocita' si calcola qui, non sul firmware (`core::planning::MotionP
 esatta, e il secondo bit di stop da' margine all'adattatore USB (misure in `PROTOCOL.md` del
 firmware, "Velocita' della linea"). Su Linux 250000 si imposta con `termios2`
 (`src/core/serial/LinuxBaud.cpp`); questa parte e' compilata dalla CI ma non e' stata provata
-su una scheda collegata a Linux.
+su una scheda collegata a Linux. Permessi, regola udev e come isolare un problema di velocita':
+[docs/LINUX.md](docs/LINUX.md).
 
 Su Windows, con le schede clone che montano un CH340 non originale: il driver WCH 3.8/3.9
 rifiuta la configurazione della porta (`cannot configure COMx (error 31)`); funziona il

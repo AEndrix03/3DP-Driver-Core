@@ -53,6 +53,15 @@ jobs:
           test -n "$ok"
           grep -q '"sim":{' status.json
           ./build-local/3dp home --http 7444
+          # una misura automatica dall'inizio alla fine: homing ripetuti, scarto zero sul simulatore
+          ./build-local/3dp measure kind=repeat axis=x n=3 --http 7444
+          for i in $(seq 1 60); do
+            ./build-local/3dp measure --http 7444 > measure.json
+            if grep -q '"active":false' measure.json; then break; fi
+            sleep 1
+          done
+          cat measure.json
+          grep -q '"verdict":"ok"' measure.json
           kill %1
 
   driver-sources:

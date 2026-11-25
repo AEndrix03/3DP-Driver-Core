@@ -54,6 +54,9 @@ namespace local {
         /// Quante volte piu' in fretta del reale scorre il tempo della macchina (solo simulazione).
         void setTimeScale(double scale);
 
+        /// Secondi trascorsi sull'orologio della macchina (scorre piu' in fretta con la stampante simulata accelerata).
+        double machineSeconds();
+
         /// Righe di errore o rifiuto arrivate dalla scheda dall'ultima chiamata (le toglie dall'elenco).
         std::vector<std::string> takeErrors();
 

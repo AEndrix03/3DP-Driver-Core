@@ -24,4 +24,8 @@ namespace local {
     void simSetSpeed(double speed);
 
     double simSpeed();
+
+    /// Sposta di `steps` il finecorsa simulato di un asse (0=X, 1=Y, 2=Z): al prossimo homing la
+    /// macchina lo trova fuori posto, come se avesse perso quegli step. Serve a vedere una misura fallire.
+    void simShiftEndstop(int axis, long steps);
 }

@@ -56,6 +56,8 @@ sources=(
     src/local/Slicer.cpp
     src/local/SimPort.cpp
     src/local/WirePort.cpp
+    src/local/Measure.cpp
+    src/local/MeasureMath.cpp
     src/local/Settings.cpp
     src/logger/Logger.cpp
     src/local/NativeSerialPort.cpp

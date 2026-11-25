@@ -75,6 +75,7 @@ driver_sources=(
     src/translator/dispatchers/compat/CompatibilityDispatcher.cpp
     src/translator/GCodeSupport.cpp
     src/translator/GCodePreview.cpp
+    src/local/MeasureMath.cpp
     tests/integration/firmware_link_test.cpp
 )
 for rel in "${driver_sources[@]}"; do

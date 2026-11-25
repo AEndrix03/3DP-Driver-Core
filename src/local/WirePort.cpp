@@ -206,6 +206,11 @@ namespace local {
         return machineTime_;
     }
 
+    double WirePort::machineSeconds() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return machineNow();
+    }
+
     void WirePort::setTimeScale(double scale) {
         std::lock_guard<std::mutex> lock(mutex_);
         machineNow(); // il tempo gia' trascorso vale alla scala di prima

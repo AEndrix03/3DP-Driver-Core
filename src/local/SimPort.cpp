@@ -10,6 +10,7 @@
 namespace local {
     namespace {
         std::atomic<double> speed_{1.0};
+        std::atomic<long> endstop_[3] = {{-800}, {-800}, {-400}};
 
         class SimPort : public core::SerialPort {
         public:
@@ -28,9 +29,7 @@ namespace local {
     std::shared_ptr<core::SerialPort> openSim(double speed) {
         sim::start();
         // Finecorsa a 10 mm (X, Y) e 1 mm (Z) sotto il punto di accensione: l'homing li trova
-        sim::setEndstop(0, -800);
-        sim::setEndstop(1, -800);
-        sim::setEndstop(2, -400);
+        for (int a = 0; a < 3; ++a) sim::setEndstop(a, endstop_[a]);
         // Ugello: modello termico pilotato dal pin dell'heater
         sim::enableThermalModel(true, 25.0);
         simSetSpeed(speed);
@@ -48,6 +47,12 @@ namespace local {
     }
 
     double simSpeed() { return speed_; }
+
+    void simShiftEndstop(int axis, long steps) {
+        if (axis < 0 || axis > 2) return;
+        endstop_[axis] += steps;
+        sim::setEndstop(axis, endstop_[axis]);
+    }
 }
 
 #else
@@ -62,6 +67,8 @@ namespace local {
     void simSetSpeed(double) {}
 
     double simSpeed() { return 1.0; }
+
+    void simShiftEndstop(int, long) {}
 }
 
 #endif

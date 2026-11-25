@@ -11,7 +11,7 @@
  *
  *   3dp <comando> [chiave=valore ...]
  *       client delle stesse API: status, home, jog, temp, fan, gcode, print, upload,
- *       pause, resume, cancel, estop, clear, history, diag. Stampa la risposta JSON.
+ *       pause, resume, cancel, estop, clear, history, diag, measure. Stampa la risposta JSON.
  *
  * Una sola API, due clienti (pagina web e CLI): solo il servizio possiede la seriale.
  */
@@ -28,6 +28,7 @@
 #include "SimPort.hpp"
 #include "WirePort.hpp"
 #include "Settings.hpp"
+#include "Measure.hpp"
 #include "core/DriverInterface.hpp"
 #include "core/printer/job/GCodeDownloader.hpp"
 #include "core/printer/job/PrintJobManager.hpp"
@@ -216,12 +217,21 @@ namespace {
                         "): the board probably runs an older firmware, flash the current one";
                 return false;
             }
+            local::Measure::Host host;
+            host.driver = driver_;
+            host.wire = wire_;
+            host.settings = &settings_;
+            host.history = &history_;
+            host.restore = [this] { applySettings(true); };
+            host.timeScale = simulated_ ? local::simSpeed() : 1.0;
+            measure_ = std::make_unique<local::Measure>(host);
             running_ = true;
             poller_ = std::thread([this] { pollLoop(); });
             return true;
         }
 
         void stop() {
+            measure_.reset(); // ferma la misura in corso e attende che lasci la macchina
             running_ = false;
             if (poller_.joinable()) poller_.join();
             if (queue_) queue_->stop();
@@ -252,6 +262,7 @@ namespace {
                 << ",\"file\":" << quote(activePath_)
                 << ",\"elapsed\":" << (activeJob_.empty() ? 0 : static_cast<long long>(std::time(nullptr) - activeStart_))
                 << "}"
+                << ",\"measuring\":" << (measure_->active() ? "true" : "false")
                 << ",\"linearAdvance\":" << driver_->motion()->linearAdvance()
                 << ",\"slicer\":{\"found\":" << (slicer_.binaryFound && slicer_.profileFound ? "true" : "false")
                 << ",\"path\":" << quote(slicer_.binary) << "}"
@@ -324,6 +335,9 @@ namespace {
             return out.str();
         }
 
+        /// Misura in corso o ultimo risultato.
+        std::string measure() { return measure_->json(); }
+
         /// Percorso e tempi previsti di un file, con i limiti e il linear advance in uso.
         std::string preview(const std::string &file) {
             if (file.empty() || !std::filesystem::exists(file)) return reply(false, "file not found");
@@ -338,11 +352,14 @@ namespace {
         // ---- comandi ----
         std::string command(const std::string &name, const Params &params, const std::string &body) {
             std::lock_guard<std::mutex> lock(actionMutex_);
-            const bool printing = isActive(manager_->getCurrentState());
+            const bool measuring = measure_->active();
+            // una misura muove e scalda la macchina da sola: per i comandi vale come una stampa in corso
+            const bool printing = isActive(manager_->getCurrentState()) || measuring;
 
             if (name == "estop") {
                 // Prima di tutto: fermare i motori e spegnere l'heater, anche a stampa in corso
                 event("error", "arresto di emergenza");
+                measure_->cancel();
                 driver_->abortMotion();
                 if (printing) manager_->cancelJob();
                 const auto stopped = driver_->motion()->emergencyStop();
@@ -359,14 +376,46 @@ namespace {
                 if (ok) event("info", "ripresa");
                 return reply(ok, ok ? "resume" : manager_->lastRecoveryError());
             }
+            if (name == "cancel" && measuring) {
+                measure_->cancel();
+                return reply(true, "the measurement stops at the next move");
+            }
             if (name == "cancel") {
                 event("warn", "annullata dall'operatore");
                 return reply(manager_->cancelJob(), "cancel");
+            }
+            if (name == "config" && measuring && !params.empty()) {
+                return configJson(false, "the configuration cannot be changed while a measurement is running");
             }
             if (name == "config") return configure(params, printing);
             if (name == "endstops") return reply(driver_->endstop()->readEndstopStatus());
             if (name == "clear") return reply(driver_->system()->clearError());
             if (name == "diag") return reply(driver_->system()->diagnostics());
+            if (name == "measure") {
+                if (params.count("kind") && params.at("kind") == "steps") {
+                    bool ok = false;
+                    const std::string advice = measure_->stepsAdvice(params, ok);
+                    return reply(ok, advice);
+                }
+                if (params.empty()) return measure_->json();
+                if (printing) return reply(false, measuring ? "a measurement is already running" : "not allowed while a print is active");
+                const std::string refused = measure_->start(params);
+                return reply(refused.empty(), refused.empty() ? "measurement started" : refused);
+            }
+            if (name == "simfault") {
+                // solo stampante simulata: sposta un finecorsa, cosi' la prossima misura trova step "persi"
+                if (!simulated_) return reply(false, "not a simulated printer");
+                const auto axis = params.find("axis");
+                const auto steps = numberParam(params, "steps");
+                const size_t index = axis == params.end() || axis->second.empty() ? std::string::npos
+                        : std::string("XYZ").find(static_cast<char>(std::toupper(static_cast<unsigned char>(axis->second[0]))));
+                if (index == std::string::npos || !steps) return reply(false, "simfault: axis=x|y|z steps=<n>");
+                local::simShiftEndstop(static_cast<int>(index), static_cast<long>(*steps));
+                return reply(true, "endstop moved");
+            }
+            if (measuring && (name == "temp" || name == "fan" || name == "gcode" || name == "print" || name == "clear")) {
+                return reply(false, "not allowed while a measurement is running (cancel it first)");
+            }
             if (name == "temp") {
                 const auto target = numberParam(params, "s");
                 if (!target) return reply(false, "missing s=<degrees>");
@@ -393,6 +442,7 @@ namespace {
                 if (!speed || *speed <= 0.0) return reply(false, "missing s=<time scale>");
                 local::simSetSpeed(*speed);
                 wire_->setTimeScale(local::simSpeed());
+                measure_->setTimeScale(local::simSpeed());
                 return reply(true, "simulation speed set");
             }
             if (name == "upload") return upload(params, body);
@@ -422,7 +472,7 @@ namespace {
             }
 
             // Da qui: movimenti manuali, non ammessi durante una stampa
-            if (printing) return reply(false, "not allowed while a print is active");
+            if (printing) return reply(false, measuring ? "not allowed while a measurement is running" : "not allowed while a print is active");
 
             if (name == "test") return test(params);
             if (name == "home") {
@@ -460,6 +510,7 @@ namespace {
         std::shared_ptr<translator::gcode::GCodeTranslator> translator_;
         std::shared_ptr<core::CommandExecutorQueue> queue_;
         std::shared_ptr<core::print::PrintJobManager> manager_;
+        std::unique_ptr<local::Measure> measure_;
 
         std::mutex actionMutex_; // un comando dell'operatore alla volta
         std::mutex cacheMutex_;
@@ -981,6 +1032,9 @@ namespace {
             const uint64_t after = req.has_param("after") ? std::strtoull(req.get_param_value("after").c_str(), nullptr, 10) : 0;
             res.set_content(service.live(after), "application/json");
         });
+        server.Get("/api/measure", [&](const httplib::Request &, httplib::Response &res) {
+            res.set_content(service.measure(), "application/json");
+        });
         server.Get("/api/preview", [&](const httplib::Request &req, httplib::Response &res) {
             res.set_content(service.preview(req.get_param_value("file")), "application/json");
         });
@@ -1031,7 +1085,7 @@ namespace {
         }
 
         httplib::Result result{nullptr, httplib::Error::Unknown};
-        if (name == "status" || name == "history") {
+        if (name == "status" || name == "history" || (name == "measure" && params.empty())) {
             result = http.Get(("/api/" + name).c_str());
         } else {
             if (name == "upload") {
@@ -1073,6 +1127,12 @@ namespace {
                   "  3dp test kind=shuttle|ladder|square|circle|stream|extrude [axis=x distance=50 feed=3000\n"
                   "                            feed2=4800 repeats=3 segment=0.1]   motion tests, run as jobs\n"
                   "  3dp endstops              endstop switches, read now\n"
+                  "  3dp measure               state or last result of the self-measurements\n"
+                  "  3dp measure kind=repeat|speed|accel|travel axis=x   measured by homing again: steps lost\n"
+                  "  3dp measure kind=tnoise | kind=heat [target=200]    temperature sensor and regulation\n"
+                  "  3dp measure kind=stress [minutes=10 check=2 z=1]    mechanics stress test, verified by homing\n"
+                  "  3dp measure kind=pack name=mechanics|thermal|all    the whole set, one report\n"
+                  "  3dp measure kind=steps axis=x commanded=100 measured=99.2   steps per mm from a ruler\n"
                   "  3dp gcode \"G1 X10 F3000\"\n"
                   "  3dp upload <file.gcode>   3dp print <file.gcode> [name=...] [force=1]\n"
                   "                            [dry=heat|motion]  dry run: no heating; motion = extruder still too\n"

@@ -169,6 +169,14 @@ input[type=range] { accent-color:var(--accent); }
 details { margin-top:10px; } summary { cursor:pointer; color:var(--muted); font-size:12.5px; }
 details > div { margin-top:8px; }
 #log { font:12px/1.4 var(--mono); white-space:pre-wrap; max-height:120px; overflow:auto; color:var(--muted); margin-top:8px; }
+h3.sec { margin:22px 0 4px; font-size:15px; font-weight:650; } h3.sec:first-of-type { margin-top:0; }
+p.lead, div.lead { margin:0 0 12px; color:var(--muted); font-size:13px; max-width:92ch; }
+.meas { margin-bottom:14px; } .meas h4 { margin:14px 0 4px; font-size:12px; color:var(--muted); font-weight:650; }
+.mbar { height:4px; border-radius:2px; background:var(--line); overflow:hidden; } .mbar i { display:block; height:100%; width:0; background:var(--accent); transition:width .4s; }
+.mrow { display:flex; gap:10px; align-items:baseline; padding:4px 0; border-bottom:1px solid color-mix(in srgb, var(--line) 60%, transparent); font-size:13px; }
+.mrow i { flex:none; width:8px; height:8px; border-radius:50%; background:var(--line); transform:translateY(-1px); }
+.mrow.ok i { background:var(--ok); } .mrow.warn i { background:var(--warn); } .mrow.bad i { background:var(--danger); }
+.mrow span { flex:0 0 34%; color:var(--muted); } .mrow b { font-weight:500; flex:1; } .mrow.bad b { color:var(--danger); }
 pre.out { font:12px/1.45 var(--mono); white-space:pre-wrap; background:var(--bg); border:1px solid var(--line); border-radius:9px; padding:8px 10px; margin:10px 0 0; max-height:180px; overflow:auto; }
 
 /* ---------- configurazione ---------- */
@@ -374,7 +382,67 @@ td.wide { white-space:normal; color:var(--muted); }
 
 <!-- ============================================================ TEST -->
 <div id="tab-tests" hidden>
-  <div id="testLock" class="note" hidden style="margin:0 0 14px">Un lavoro &egrave; in corso: i test si possono avviare solo a macchina ferma.</div>
+  <div id="testLock" class="note" hidden style="margin:0 0 14px">Un lavoro o una misura &egrave; in corso: test e misure si possono avviare solo a macchina ferma.</div>
+
+  <h3 class="sec">Misure automatiche</h3>
+  <p class="lead">La macchina si misura da sola. Il suo unico sensore di posizione &egrave; il finecorsa: dopo ogni prova rif&agrave; l'homing e il firmware dice di quanti step il contatto &egrave; arrivato fuori posto. Zero vuol dire che la meccanica non ha perso step. Servono i finecorsa abilitati nel firmware.</p>
+  <div id="measBox" class="card meas" hidden>
+    <div class="row" style="align-items:center"><h2 id="measTitle" style="margin:0;flex:1"></h2><span id="measVerdict" class="tag"></span>
+      <button class="btn small warn" id="measCancel" onclick="api('cancel')" hidden>Annulla</button></div>
+    <div id="measPhase" class="lead" style="margin:8px 0 6px"></div>
+    <div class="mbar"><i id="measBar"></i></div>
+    <div id="measRows"></div>
+    <div id="measSuggest" class="note good" hidden></div>
+  </div>
+  <div class="cards">
+    <div class="card"><h2>Pacchetti</h2><p>Pi&ugrave; misure di fila, un solo resoconto. Meccanica: finecorsa, velocit&agrave;, accelerazione di X e Y e tre minuti di stress. Termico: sensore, riscaldamento, PID.</p>
+      <div class="row"><button class="btn primary" data-idle onclick="runMeasure('pack',{name:'mechanics'})">Meccanica</button>
+        <button class="btn primary" data-idle onclick="runMeasure('pack',{name:'thermal'})">Termico</button>
+        <button class="btn" data-idle onclick="runMeasure('pack',{name:'all'})">Tutto</button></div></div>
+
+    <div class="card"><h2>Ripetibilit&agrave; del finecorsa</h2><p>Tocca il finecorsa pi&ugrave; volte: la dispersione &egrave; la precisione di tutte le altre misure.</p>
+      <div class="row"><label class="f"><span>Asse</span><select id="m1a"><option>x</option><option>y</option><option>z</option></select></label>
+        <label class="f"><span>Contatti</span><input id="m1n" type="number" value="10"></label></div>
+      <div class="row"><button class="btn primary" data-idle onclick="runMeasure('repeat',{axis:val('m1a'),n:val('m1n')})">Misura</button></div></div>
+
+    <div class="card"><h2>Velocit&agrave; massima</h2><p>Va e vieni a velocit&agrave; crescenti, con un homing di controllo dopo ogni gradino: si ferma al primo che perde step.</p>
+      <div class="row"><label class="f"><span>Asse</span><select id="m2a"><option>x</option><option>y</option><option>z</option></select></label>
+        <label class="f"><span>Corsa mm</span><input id="m2d" type="number" value="100"></label>
+        <label class="f"><span>Gradini</span><input id="m2l" type="number" value="6"></label></div>
+      <div class="row"><button class="btn primary" data-idle onclick="runMeasure('speed',{axis:val('m2a'),distance:val('m2a')==='z'?Math.min(20,val('m2d')):val('m2d'),levels:val('m2l')})">Misura</button></div></div>
+
+    <div class="card"><h2>Accelerazione massima</h2><p>Tratti corti con molte inversioni, ad accelerazioni crescenti fino al limite della macchina.</p>
+      <div class="row"><label class="f"><span>Asse</span><select id="m3a"><option>x</option><option>y</option><option>z</option></select></label>
+        <label class="f"><span>Corsa mm</span><input id="m3d" type="number" value="20"></label>
+        <label class="f"><span>Gradini</span><input id="m3l" type="number" value="6"></label></div>
+      <div class="row"><button class="btn primary" data-idle onclick="runMeasure('accel',{axis:val('m3a'),distance:val('m3a')==='z'?Math.min(5,val('m3d')):val('m3d'),levels:val('m3l')})">Misura</button></div></div>
+
+    <div class="card"><h2>Corsa dell'asse</h2><p>Va piano fino al fondo corsa dichiarato e torna. Se la corsa vera &egrave; pi&ugrave; corta il carrello arriva a battuta e il motore salta: da l&igrave; si ricava la lunghezza reale.</p>
+      <div class="row"><label class="f"><span>Asse</span><select id="m4a"><option>x</option><option>y</option><option>z</option></select></label>
+        <label class="f"><span>Velocit&agrave; mm/s</span><input id="m4s" type="number" value="20"></label></div>
+      <div class="row"><button class="btn primary" data-idle onclick="runMeasure('travel',{axis:val('m4a'),speed:val('m4s')})">Misura</button></div></div>
+
+    <div class="card"><h2>Temperatura</h2><p>Rumore del sensore a riposo; poi salita, superamento e tenuta al target, con una proposta di guadagni del PID ricavata dalla curva.</p>
+      <div class="row"><label class="f"><span>Target &deg;C</span><input id="m5t" type="number" value="200"></label>
+        <label class="f"><span>Tenuta s</span><input id="m5h" type="number" value="60"></label></div>
+      <div class="row"><button class="btn" data-idle onclick="runMeasure('tnoise',{})">Sensore a riposo</button>
+        <button class="btn primary" data-idle onclick="runMeasure('heat',{target:val('m5t'),hold:val('m5h')})">Riscaldamento</button></div></div>
+
+    <div class="card"><h2>Stress test della meccanica</h2><p>Corse lunghe, inversioni fitte a passi diversi (cerca le risonanze), cerchi e scatti, alle velocit&agrave; della configurazione. Ogni tanto un homing verifica che non si siano persi step.</p>
+      <div class="row"><label class="f"><span>Durata min</span><input id="m6m" type="number" value="10"></label>
+        <label class="f"><span>Verifica ogni min</span><input id="m6c" type="number" value="2"></label>
+        <label class="f"><span>Anche Z</span><select id="m6z"><option value="0">no</option><option value="1">s&igrave;</option></select></label></div>
+      <div class="row"><button class="btn primary" data-idle onclick="runMeasure('stress',{minutes:val('m6m'),check:val('m6c'),z:val('m6z')})">Avvia</button></div></div>
+
+    <div class="card"><h2>Step per millimetro</h2><p>Questa non pu&ograve; farla da sola: serve un calibro. Muovi l'asse di una lunghezza nota, misura quanto si &egrave; spostato davvero e inserisci i due valori.</p>
+      <div class="row"><label class="f"><span>Asse</span><select id="m7a"><option>x</option><option>y</option><option>z</option><option>e</option></select></label>
+        <label class="f"><span>Chiesti mm</span><input id="m7c" type="number" value="100"></label>
+        <label class="f"><span>Misurati mm</span><input id="m7m" type="number" step="0.01" value="100"></label></div>
+      <div class="row"><button class="btn" onclick="stepsAdvice()">Calcola</button></div><pre class="out" id="outSteps" hidden></pre></div>
+  </div>
+
+  <h3 class="sec">Movimenti di prova</h3>
+  <p class="lead">Solo movimento, nessuna misura: per guardare e ascoltare la macchina.</p>
   <div class="cards">
     <div class="card"><h2>Va e vieni</h2><p>Un asse avanti e indietro: ripetibilit&agrave;, rumori, giochi.</p>
       <div class="row"><label class="f"><span>Asse</span><select id="t1a"><option>x</option><option>y</option><option>z</option></select></label>
@@ -554,6 +622,65 @@ async function startPrint() {
   if (started && started.ok) { $('startBtn').disabled = true; playing = false; }
   else if (started) setReport(started.message, true);
 }
+
+// ------------------------------------------------------------------ misure automatiche
+let measTimer = null, measLast = '';
+async function runMeasure(kind, values) {
+  const query = 'kind=' + kind + Object.entries(values).map(([k, v]) => '&' + k + '=' + encodeURIComponent(v)).join('');
+  const result = await api('measure', query);
+  const box = $('testMsg');
+  if (result && result.ok) { box.hidden = true; pollMeasure(); $('measBox').scrollIntoView({behavior: 'smooth', block: 'nearest'}); }
+  else { box.hidden = false; box.className = 'note bad'; box.textContent = result ? result.message : 'Servizio non raggiungibile.'; }
+}
+async function pollMeasure() {
+  clearTimeout(measTimer);
+  let m;
+  try { m = await (await fetch('/api/measure')).json(); } catch (e) { return; }
+  renderMeasure(m);
+  measTimer = m.active ? setTimeout(pollMeasure, 600) : null;
+}
+// il servizio scrive senza accenti (velocita', piu', e'): qui tornano lettere accentate
+const ACCENT = {a: 'à', e: 'è', i: 'ì', o: 'ò', u: 'ù'};
+const nice = t => esc(t).replace(/([aeiou])&#39;(?=[\s,.:;)]|$)/g, (all, v) => ACCENT[v]);
+function renderMeasure(m) {
+  if (!m.kind) return;
+  $('measBox').hidden = false;
+  $('measTitle').innerHTML = nice(m.title.charAt(0).toUpperCase() + m.title.slice(1));
+  $('measCancel').hidden = !m.active;
+  const names = {ok: ['superata', 'COMPLETED'], bad: ['non superata', 'FAILED'], error: ['interrotta', 'FAILED'], cancelled: ['annullata', 'CANCELLED']};
+  const tag = $('measVerdict');
+  tag.textContent = m.active ? 'in corso' : (names[m.verdict] || ['', ''])[0];
+  tag.className = 'tag ' + (m.active ? 'RUNNING' : (names[m.verdict] || ['', ''])[1]);
+  $('measPhase').innerHTML = nice(m.active ? m.phase : m.summary);
+  $('measBar').style.width = (m.progress * 100).toFixed(1) + '%';
+  const key = JSON.stringify([m.rows, m.suggest, m.active]);
+  if (key === measLast) return; // niente ridisegno se non e' cambiato nulla
+  measLast = key;
+  let html = '', section = '';
+  for (const r of m.rows) {
+    if (r.section !== section) { section = r.section; html += '<h4>' + nice(section) + '</h4>'; }
+    html += '<div class="mrow ' + r.verdict + '"><i></i><span>' + nice(r.label) + '</span><b>' + nice(r.value) + '</b></div>';
+  }
+  $('measRows').innerHTML = html;
+  const keys = Object.keys(m.suggest || {});
+  const sug = $('measSuggest');
+  sug.hidden = !keys.length || m.active;
+  if (keys.length && !m.active) {
+    sug.innerHTML = 'Valori proposti: ' + keys.map(k => '<b>' + esc(k) + ' = ' + esc(m.suggest[k]) + '</b>').join(', ')
+      + ' <button class="btn small" id="measApply" style="margin-left:8px">Applica alla configurazione</button>';
+    $('measApply').onclick = async () => {
+      const done = await api('config', keys.map(k => k + '=' + encodeURIComponent(m.suggest[k])).join('&'));
+      sug.textContent = done && done.ok ? 'Applicati e salvati: ripeti la misura per verificarli.' : 'Non applicati: ' + (done ? done.message : 'servizio non raggiungibile');
+    };
+  }
+}
+async function stepsAdvice() {
+  const result = await api('measure', 'kind=steps&axis=' + val('m7a') + '&commanded=' + val('m7c') + '&measured=' + val('m7m'));
+  const box = $('outSteps'); box.hidden = false; box.textContent = result ? result.message : 'Servizio non raggiungibile.';
+}
+pollMeasure();
+// indirizzo con #tests, #config o #history: apre direttamente quella scheda
+if (['tests', 'config', 'history'].includes(location.hash.slice(1))) show(location.hash.slice(1));
 
 // ------------------------------------------------------------------ test
 async function runTest(kind, values) {
@@ -1062,9 +1189,11 @@ async function refresh() {
     if (document.activeElement !== $(id)) { $(id).value = value; $(label).textContent = value + suffix; }
   }
   // a lavoro in corso i comandi che muoverebbero la macchina sono spenti
-  document.querySelectorAll('[data-idle]').forEach(el => el.disabled = active);
-  $('jogLock').hidden = !active; $('testLock').hidden = !active;
-  $('startBtn').disabled = active || !ready;
+  const busyNow = active || !!s.measuring; // una misura muove la macchina da sola: vale come un lavoro
+  if (s.measuring && !measTimer) pollMeasure();
+  document.querySelectorAll('[data-idle]').forEach(el => el.disabled = busyNow);
+  $('jogLock').hidden = !busyNow; $('testLock').hidden = !busyNow;
+  $('startBtn').disabled = busyNow || !ready;
 
   const done = active && live && pv && pv.total > 0 ? Math.min(100, timeAt(Math.max(0, cursor)) / pv.total * 100) : job.percent;
   $('pct').textContent = active ? done.toFixed(1) + '%' : '–';
