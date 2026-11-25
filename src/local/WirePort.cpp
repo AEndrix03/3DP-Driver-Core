@@ -2,6 +2,8 @@
 
 #include "core/MoveFrame.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 
@@ -98,6 +100,55 @@ namespace local {
             long long steps[4] = {0, 0, 0, 0};
             bool hasPlan = false;
             double speed = 0.0, acceleration = 0.0;
+            double stepsPerMm = 0.0; ///< step dell'asse dominante per mm di percorso
+            double entry = 0.0;      ///< mm/s
+        };
+
+        /// Profilo a trapezio di un movimento: da `entry` a `exit` passando (se c'e' spazio) per `nominal`.
+        struct Profile {
+            double v0, v1, peak, accel, tUp, tFlat, tDown, dUp, dFlat;
+
+            Profile(double length, double entry, double exit, double nominal, double acceleration) {
+                accel = acceleration > 1.0 ? acceleration : 1.0;
+                const double vn = nominal > 0.01 ? nominal : 0.01;
+                v0 = std::min(entry, vn);
+                v1 = std::min(exit, vn);
+                peak = vn;
+                dUp = (vn * vn - v0 * v0) / (2.0 * accel);
+                double dDown = (vn * vn - v1 * v1) / (2.0 * accel);
+                if (dUp + dDown > length) { // troppo corto per arrivare alla velocita' nominale
+                    peak = std::sqrt(std::max(accel * length + (v0 * v0 + v1 * v1) / 2.0, std::max(v0 * v0, v1 * v1)));
+                    dUp = (peak * peak - v0 * v0) / (2.0 * accel);
+                    dDown = (peak * peak - v1 * v1) / (2.0 * accel);
+                }
+                dFlat = std::max(0.0, length - dUp - dDown);
+                tUp = (peak - v0) / accel;
+                tFlat = dFlat / peak;
+                tDown = (peak - v1) / accel;
+            }
+
+            double duration() const { return tUp + tFlat + tDown; }
+
+            /// mm percorsi e velocita' dopo `t` secondi dall'inizio
+            void at(double t, double &distance, double &speed) const {
+                if (t <= 0.0) {
+                    distance = 0.0;
+                    speed = v0;
+                } else if (t < tUp) {
+                    distance = v0 * t + accel * t * t / 2.0;
+                    speed = v0 + accel * t;
+                } else if (t < tUp + tFlat) {
+                    distance = dUp + peak * (t - tUp);
+                    speed = peak;
+                } else if (t < duration()) {
+                    const double d = t - tUp - tFlat;
+                    distance = dUp + dFlat + peak * d - accel * d * d / 2.0;
+                    speed = peak - accel * d;
+                } else {
+                    distance = dUp + dFlat + (peak * peak - v1 * v1) / (2.0 * accel);
+                    speed = v1;
+                }
+            }
         };
 
         /// Stessa lettura di MoveFrame::describe, ma con i valori.
@@ -126,6 +177,8 @@ namespace local {
                 out.speed = field(3) / 64.0;
                 out.acceleration = field(3);
             }
+            out.stepsPerMm = field(3) / 16.0;
+            out.entry = field(2) / 4.0;
             return true;
         }
     }
@@ -146,8 +199,33 @@ namespace local {
         if (entries_.size() > KEPT) entries_.pop_front();
     }
 
+    double WirePort::machineNow() {
+        const auto now = std::chrono::steady_clock::now();
+        machineTime_ += std::chrono::duration<double>(now - machineStamp_).count() * timeScale_;
+        machineStamp_ = now;
+        return machineTime_;
+    }
+
+    void WirePort::setTimeScale(double scale) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        machineNow(); // il tempo gia' trascorso vale alla scala di prima
+        timeScale_ = scale > 0.0 ? scale : 1.0;
+    }
+
     void WirePort::completedUpTo(uint32_t number) {
-        while (!pending_.empty() && pending_.front().number <= number) pending_.pop_front();
+        bool removed = false;
+        while (!pending_.empty() && pending_.front().number <= number) {
+            if (pending_.front().cartesian) travelledDone_ += pending_.front().length;
+            pending_.pop_front();
+            removed = true;
+        }
+        if (!removed || pending_.empty()) return;
+        // Il firmware e' piu' avanti di quanto previsto: il primo rimasto e' gia' partito, non puo'
+        // cominciare nel futuro. Tutta la previsione si anticipa della stessa quantita'.
+        const double late = pending_.front().start - machineNow();
+        if (late > 0.0) {
+            for (Pending &p: pending_) p.start -= late;
+        }
     }
 
     void WirePort::send(const std::string &data) {
@@ -186,11 +264,37 @@ namespace local {
                     lastNumber_ = number;
                     Pending pending;
                     pending.number = number;
-                    for (int a = 0; a < 4; ++a) pending.steps[a] = frame.steps[a];
+                    long long longest = 0;
+                    for (int a = 0; a < 4; ++a) {
+                        pending.steps[a] = frame.steps[a];
+                        longest = std::max(longest, std::llabs(frame.steps[a]));
+                    }
                     pending.speed = modalSpeed_;
                     pending.acceleration = modalAcceleration_;
+                    pending.length = frame.stepsPerMm > 0.0 ? static_cast<double>(longest) / frame.stepsPerMm : 0.0;
+                    pending.cartesian = frame.steps[0] != 0 || frame.steps[1] != 0 || frame.steps[2] != 0;
+                    pending.entry = frame.entry;
+                    // --- quando partira' e quanto durera', secondo il profilo che il frame descrive ---
+                    const double now = machineNow();
+                    if (pending_.empty()) {
+                        pending.entry = 0.0;         // da fermi si parte sempre da fermi
+                        pending.start = now + 0.03;  // il firmware attende altri movimenti per 30 ms
+                    } else {
+                        // il movimento precedente non finisce piu' da fermo: esce alla velocita' d'ingresso di questo
+                        Pending &before = pending_.back();
+                        before.exit = std::min(pending.entry, before.speed);
+                        before.duration = Profile(before.length, before.entry, before.exit, before.speed,
+                                                  before.acceleration).duration();
+                        pending.start = std::max(now, before.start + before.duration);
+                        if (pending.start > before.start + before.duration + 1e-9) pending.entry = 0.0; // coda svuotata
+                    }
+                    pending.duration = Profile(pending.length, pending.entry, 0.0, pending.speed,
+                                               pending.acceleration).duration();
                     pending_.push_back(pending);
-                    if (pending_.size() > 64) pending_.pop_front(); // mai tanti in volo: difesa da risposte perse
+                    if (pending_.size() > 64) { // mai tanti in volo: difesa da risposte perse
+                        if (pending_.front().cartesian) travelledDone_ += pending_.front().length;
+                        pending_.pop_front();
+                    }
                 }
                 record('T', again ? "resend" : "move", again ? "MOVE (di nuovo)" : "MOVE", toHex(bytes),
                        core::MoveFrame::describe(bytes));
@@ -252,14 +356,30 @@ namespace local {
     WirePort::Live WirePort::live() {
         std::lock_guard<std::mutex> lock(mutex_);
         Live result = counters_;
+        const double now = machineNow();
+        double left[4] = {0, 0, 0, 0};
+        result.travelled = travelledDone_;
         for (const Pending &p: pending_) {
-            for (int a = 0; a < 4; ++a) result.outstanding[a] += p.steps[a];
+            // quanta parte del movimento resta da fare, secondo il suo profilo
+            double remaining = 1.0;
+            if (now > p.start && p.length > 0.0) {
+                const Profile profile(p.length, p.entry, p.exit, p.speed, p.acceleration);
+                double distance = 0.0, speed = 0.0;
+                profile.at(now - p.start, distance, speed);
+                remaining = std::clamp(1.0 - distance / p.length, 0.0, 1.0);
+                if (remaining > 0.0 && remaining < 1.0) {
+                    result.speed = speed;
+                    result.acceleration = p.acceleration;
+                }
+            } else if (now > p.start) {
+                remaining = now > p.start + p.duration ? 0.0 : 1.0;
+            }
+            for (int a = 0; a < 4; ++a) left[a] += static_cast<double>(p.steps[a]) * remaining;
+            if (p.cartesian) result.travelled += p.length * (1.0 - remaining);
+            // quelli che secondo il profilo sono gia' finiti non contano piu', anche se la conferma deve ancora arrivare
+            if (remaining > 0.0 || now <= p.start + p.duration) ++result.queued;
         }
-        result.queued = static_cast<int>(pending_.size());
-        if (!pending_.empty()) {
-            result.speed = pending_.front().speed;
-            result.acceleration = pending_.front().acceleration;
-        }
+        for (int a = 0; a < 4; ++a) result.outstanding[a] = std::llround(left[a]);
         return result;
     }
 

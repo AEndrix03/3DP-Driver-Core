@@ -136,6 +136,7 @@ input[type=range] { accent-color:var(--accent); }
 #wire .hex { color:var(--muted); overflow:hidden; text-overflow:ellipsis; }
 #wire .txt { overflow:hidden; text-overflow:ellipsis; }
 #wire .err .txt { color:var(--danger); }
+#wire .dim { opacity:.55; }
 #wire .gap { display:block; color:var(--muted); padding:0 10px; }
 
 /* ---------- stato stampa ---------- */
@@ -288,7 +289,7 @@ td.wide { white-space:normal; color:var(--muted); }
       <dl class="kv">
         <dt>Trascorso</dt><dd id="elapsed">-</dd>
         <dt>Restano circa</dt><dd id="remaining">-</dd>
-        <dt>Righe</dt><dd id="lines">-</dd>
+        <dt title="Righe del file gi&agrave; consegnate al driver: sono avanti rispetto a ci&ograve; che la macchina ha eseguito">Righe consegnate</dt><dd id="lines">-</dd>
         <dt>Ultimo esito</dt><dd id="last" style="font-family:var(--sans)">-</dd>
       </dl>
       <div id="fault" class="note bad" hidden></div>
@@ -634,12 +635,14 @@ async function loadPreview(path, name, keep) {
   if (!data || !data.ok || !data.pts) return;
   const n = data.count, pts = data.pts;
   const p = {file: path, name: name || path.split(/[\\/]/).pop(), n, total: data.seconds, heatWaits: data.heatWaits,
-    x: new Float32Array(n), y: new Float32Array(n), z: new Float32Array(n), t: new Float32Array(n), c: new Uint32Array(n), e: new Uint8Array(n)};
+    x: new Float32Array(n), y: new Float32Array(n), z: new Float32Array(n), t: new Float32Array(n), c: new Uint32Array(n), e: new Uint8Array(n),
+    len: new Float64Array(n)};
   let maxZ = 0, topZ = 0, tracks = 0;
   const layerOf = new Map(), ex = [], ey = [], ax = [], ay = [], every = Math.max(1, Math.floor(n / 4000));
   for (let i = 0, k = 0; i < n; ++i, k += 6) {
     p.x[i] = pts[k] / 100; p.y[i] = pts[k + 1] / 100; p.z[i] = pts[k + 2] / 100; p.t[i] = pts[k + 3] / 100; p.c[i] = pts[k + 4]; p.e[i] = pts[k + 5];
     topZ = Math.max(topZ, p.z[i]);
+    if (i) p.len[i] = p.len[i - 1] + Math.hypot(p.x[i] - p.x[i - 1], p.y[i] - p.y[i - 1], p.z[i] - p.z[i - 1]); // strada fatta fin qui
     if (p.e[i]) { ++tracks; layerOf.set(pts[k + 2], 0); maxZ = Math.max(maxZ, p.z[i]); }
     if (i % every === 0) { ax.push(p.x[i]); ay.push(p.y[i]); if (p.e[i]) { ex.push(p.x[i]); ey.push(p.y[i]); } }
   }
@@ -688,15 +691,20 @@ function seek(t) {
   const i = Math.max(1, indexAtTime(t)), span = pv.t[i] - pv.t[i - 1];
   cursor = Math.min(pv.n - 1, i - 1 + (span > 0 ? Math.min(1, Math.max(0, (t - pv.t[i - 1]) / span)) : 1));
 }
-/// Il punto del percorso piu' vicino alla posizione eseguita, cercato poco prima di cio' che e' gia' stato inviato
-function locate(x, y, z, upTo) {
-  let best = upTo, bestD = 1e18;
-  for (let i = Math.max(1, upTo - 900); i <= upTo; ++i) {
+/// A che punto del percorso e' la macchina. La strada percorsa dice dove cercare (vale anche se il
+/// percorso ripassa sugli stessi punti); li' attorno si prende il punto piu' vicino alla posizione eseguita.
+function locate(x, y, z, travelled, upTo) {
+  const first = target => { let lo = 0, hi = upTo; while (lo < hi) { const mid = (lo + hi) >> 1; if (pv.len[mid] < target) lo = mid + 1; else hi = mid; } return lo; };
+  // tolleranza in millimetri di strada, non in numero di punti: su un percorso corto pochi punti sono gia' un giro intero
+  const slack = 3 + travelled * 0.004;
+  const from = Math.max(1, first(travelled - slack)), to = Math.max(from, Math.min(upTo, first(travelled + slack)));
+  let best = Math.min(first(travelled), upTo), bestD = 1e18;
+  for (let i = from; i <= to; ++i) {
     const ax = pv.x[i - 1], ay = pv.y[i - 1], az = pv.z[i - 1], dx = pv.x[i] - ax, dy = pv.y[i] - ay, dz = pv.z[i] - az;
     const len = dx * dx + dy * dy + dz * dz;
     const f = len > 0 ? Math.min(1, Math.max(0, ((x - ax) * dx + (y - ay) * dy + (z - az) * dz) / len)) : 1;
     const d = (ax + dx * f - x) ** 2 + (ay + dy * f - y) ** 2 + (az + dz * f - z) ** 2;
-    if (d <= bestD) { bestD = d; best = i - 1 + f; }
+    if (d < bestD - 1e-9) { bestD = d; best = i - 1 + f; }
   }
   return best;
 }
@@ -882,9 +890,9 @@ function draw(now) {
     head.x = pv.x[i] + (pv.x[j] - pv.x[i]) * f; head.y = pv.y[i] + (pv.y[j] - pv.y[i]) * f; head.z = pv.z[i] + (pv.z[j] - pv.z[i]) * f;
   } else {
     // dal vivo la posizione arriva qualche volta al secondo: la si insegue per avere un moto continuo
-    const k = 1 - Math.exp(-dt / 0.14);
+    const k = 1 - Math.exp(-dt / 0.085);
     head.x += (head.tx - head.x) * k; head.y += (head.ty - head.y) * k; head.z += (head.tz - head.z) * k;
-    if (live && pv) cursor += (cursorTarget - cursor) * (1 - Math.exp(-dt / 0.2));
+    if (live && pv) cursor += (cursorTarget - cursor) * (1 - Math.exp(-dt / 0.12));
   }
   if (opt.follow) { const k = 1 - Math.exp(-dt / 0.5); cam.tx += (head.x - cam.tx) * k; cam.ty += (head.y - cam.ty) * k; cam.tz += (head.z + 10 - cam.tz) * k; }
 
@@ -976,7 +984,7 @@ function spark(target) {
 }
 
 // ------------------------------------------------------------------ dal vivo: posizione eseguita, collegamento, seriale
-let wireLast = 0, wireRows = [], wirePaused = false, wireMoves = true, wireText = true, cursorTarget = 0, lastLink = null, lastLinkAt = 0, rate = 0, byteRate = 0;
+let wireDirty = false, wireDrawn = 0, wireLast = 0, wireRows = [], wirePaused = false, wireMoves = true, wireText = true, cursorTarget = 0, lastLink = null, lastLinkAt = 0, rate = 0, byteRate = 0;
 function wireFilter(which) {
   if (which === 'moves') wireMoves = !wireMoves; else if (which === 'text') wireText = !wireText; else wirePaused = !wirePaused;
   $('wMoves').setAttribute('aria-pressed', wireMoves); $('wText').setAttribute('aria-pressed', wireText); $('wPause').setAttribute('aria-pressed', wirePaused);
@@ -987,8 +995,8 @@ function renderWire() {
   const box = $('wire'), stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 30;
   box.innerHTML = wireRows.filter(r => r.gap || ((r.k === 'move' || r.k === 'ack' || r.k === 'resend') ? wireMoves : wireText)).map(r => r.gap
     ? '<span class="gap">… ' + it(r.gap) + ' scambi non mostrati (troppi per leggerli)</span>'
-    : '<div class="' + (r.k === 'resend' || /ERR/.test(r.text) ? 'err' : '') + '"><span class="t">' + r.t.toFixed(3) + '</span><span class="' + (r.d === 'T' ? 'tx">→' : 'rx">←') + '</span><span class="k">'
-      + esc(r.n || KINDS[r.k] || r.k) + '</span><span class="hex">' + r.hex + '</span><span class="txt">' + esc(r.text) + '</span></div>').join('');
+    : '<div class="' + (r.k === 'resend' || /ERR/.test(r.text) ? 'err' : r.n === 'BUSY' ? 'dim' : '') + '"><span class="t">' + r.t.toFixed(3) + '</span><span class="' + (r.d === 'T' ? 'tx">→' : 'rx">←') + '</span><span class="k">'
+      + esc(r.n || KINDS[r.k] || r.k) + '</span><span class="hex">' + r.hex + '</span><span class="txt">' + esc(r.text) + (r.n === 'BUSY' ? ' \u2014 la scheda sta eseguendo, risponder\u00E0 appena pu\u00F2' : '') + '</span></div>').join('');
   if (stick) box.scrollTop = box.scrollHeight;
 }
 async function pollLive() {
@@ -999,7 +1007,7 @@ async function pollLive() {
   const active = status && status.job.id;
   if (d.exec.known && (d.moving || active)) { head.tx = d.exec.x; head.ty = d.exec.y; head.tz = d.exec.z; head.known = true; }
   else if (status && status.position.known) { head.tx = status.position.x; head.ty = status.position.y; head.tz = status.position.z; head.known = true; }
-  if (live && pv && status && head.known) cursorTarget = locate(head.tx, head.ty, head.tz, indexAtCommand(status.job.linesDone));
+  if (live && pv && status && head.known) cursorTarget = locate(head.tx, head.ty, head.tz, d.travelled, indexAtCommand(status.job.linesDone));
   $('tPos').textContent = head.known ? 'X' + head.tx.toFixed(1) + ' Y' + head.ty.toFixed(1) + ' Z' + head.tz.toFixed(2) : '-';
   $('tSpeed').innerHTML = d.moving ? d.speed.toFixed(1) + ' <small>mm/s</small>' : 'ferma';
   $('tQueue').innerHTML = d.queued + ' <small>/ ' + d.queueSize + '</small>';
@@ -1022,7 +1030,9 @@ async function pollLive() {
     if (d.skipped) wireRows.push({gap: d.skipped});
     wireRows.push(...d.wire);
     if (wireRows.length > 260) wireRows = wireRows.slice(-260);
-    if (tab === 'control') renderWire();
+    wireDirty = true;
+  }
+  if (wireDirty && tab === 'control' && performance.now() - wireDrawn > 320) { wireDirty = false; wireDrawn = performance.now(); renderWire();
   }
 }
 
@@ -1056,10 +1066,11 @@ async function refresh() {
   $('jogLock').hidden = !active; $('testLock').hidden = !active;
   $('startBtn').disabled = active || !ready;
 
-  $('pct').textContent = active ? job.percent.toFixed(1) + '%' : '–';
+  const done = active && live && pv && pv.total > 0 ? Math.min(100, timeAt(Math.max(0, cursor)) / pv.total * 100) : job.percent;
+  $('pct').textContent = active ? done.toFixed(1) + '%' : '–';
   $('jobName').textContent = active ? job.name : 'nessun lavoro in corso';
   $('jobState').hidden = !active; $('jobState').textContent = JOBS[job.state] || job.state; $('jobState').className = 'tag ' + job.state;
-  $('progress').style.width = (active ? job.percent : 0) + '%';
+  $('progress').style.width = (active ? done : 0) + '%';
   $('elapsed').textContent = active ? clock(job.elapsed) : '-';
   $('lines').textContent = active ? it(job.linesDone) + ' / ' + it(job.linesTotal) : '-';
   $('last').textContent = s.lastResult || '-'; $('last').title = s.lastResult || '';
@@ -1107,7 +1118,8 @@ $('simSpeed').addEventListener('change', e => api('simspeed', 's=' + e.target.va
 if (gl) { initGl(); fit(); resize(); requestAnimationFrame(draw); }
 else { $('pvName').textContent = 'Il browser non supporta WebGL2: il visualizzatore non è disponibile'; }
 setInterval(refresh, 1500); refresh();
-setInterval(pollLive, 250);
+// una lettura alla volta: se il servizio tarda non si accumulano richieste
+(async function liveLoop() { for (;;) { await pollLive(); await new Promise(r => setTimeout(r, 90)); } })();
 </script>
 </body>
 </html>

@@ -62,6 +62,9 @@ namespace core::print {
         std::shared_ptr<core::CommandExecutorQueue> commandQueue_;
         mutable std::mutex stateMutex_;
         JobState currentState_;
+        /// Copia dello stato per chi lo legge soltanto: non attende mai chi sta cambiando stato
+        /// (una pausa o la fine di un lavoro durano quanto i movimenti ancora in coda).
+        std::atomic<JobState> publishedState_{JobState::CREATED};
         std::string currentJobId_;
         std::string currentFilePath_;
 

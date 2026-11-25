@@ -127,6 +127,10 @@ namespace core::command::motion {
             }
         }
         planner_.configure(limits); // scarta anche i movimenti in attesa: partivano da un'altra posizione
+        {
+            std::lock_guard<std::mutex> sentLock(sentMutex_);
+            effective_ = limits;
+        }
         mirror_.valid = true;
         mirror_.epoch = epoch;
         mirror_.eRemainder = 0.0;  // come il firmware dopo un arresto: si riparte senza resto
@@ -189,24 +193,44 @@ namespace core::command::motion {
         sendBlocks(blocks, true); // un errore diventa un guasto quando la finestra viene chiusa
     }
 
+    // Le regolazioni non toccano mirrorMutex_: quel lucchetto resta preso per tutto il tempo in cui
+    // un movimento attende posto nella coda del firmware (anche secondi), e chi regola o legge
+    // (la pagina, un comando dell'operatore) non deve restare fermo con lui.
+    void MotionCommands::applyRequested() {
+        Requested wanted;
+        {
+            std::lock_guard<std::mutex> lock(requestedMutex_);
+            if (!requested_.dirty) return;
+            requested_.dirty = false;
+            wanted = requested_;
+        }
+        planner_.setSpeedFactor(wanted.speedFactor);
+        planner_.setBlockRate(wanted.blockRate);
+        planner_.setAccelerations(wanted.accelPrint, wanted.accelTravel);
+        planner_.setLinearAdvance(wanted.advance);
+    }
+
     void MotionCommands::setLinearAdvance(double k) {
-        std::lock_guard<std::recursive_mutex> lock(mirrorMutex_);
-        planner_.setLinearAdvance(k);
+        std::lock_guard<std::mutex> lock(requestedMutex_);
+        requested_.advance = k < 0.0 ? 0.0 : k;
+        requested_.dirty = true;
     }
 
     double MotionCommands::linearAdvance() {
-        std::lock_guard<std::recursive_mutex> lock(mirrorMutex_);
-        return planner_.linearAdvance();
+        std::lock_guard<std::mutex> lock(requestedMutex_);
+        return requested_.advance;
     }
 
     void MotionCommands::setSpeedFactor(double factor) {
-        std::lock_guard<std::recursive_mutex> lock(mirrorMutex_);
-        planner_.setSpeedFactor(factor);
+        std::lock_guard<std::mutex> lock(requestedMutex_);
+        requested_.speedFactor = factor;
+        requested_.dirty = true;
     }
 
     void MotionCommands::setBlockRate(double perSecond) {
-        std::lock_guard<std::recursive_mutex> lock(mirrorMutex_);
-        planner_.setBlockRate(perSecond);
+        std::lock_guard<std::mutex> lock(requestedMutex_);
+        requested_.blockRate = perSecond;
+        requested_.dirty = true;
     }
 
     void MotionCommands::setLimitCaps(const planning::MachineLimits &caps) {
@@ -235,13 +259,15 @@ namespace core::command::motion {
     }
 
     planning::MachineLimits MotionCommands::plannerLimits() {
-        std::lock_guard<std::recursive_mutex> lock(mirrorMutex_);
-        return planner_.limits();
+        std::lock_guard<std::mutex> sentLock(sentMutex_);
+        return effective_;
     }
 
     void MotionCommands::setAccelerations(double print, double travel) {
-        std::lock_guard<std::recursive_mutex> lock(mirrorMutex_);
-        planner_.setAccelerations(print, travel);
+        std::lock_guard<std::mutex> lock(requestedMutex_);
+        requested_.accelPrint = print;
+        requested_.accelTravel = travel;
+        requested_.dirty = true;
     }
 
     types::Result MotionCommands::move(const MoveTarget &target, bool absolute, bool pipelined) {
@@ -253,6 +279,7 @@ namespace core::command::motion {
             const types::Result synced = syncMirror();
             if (!synced.isSuccess()) return synced;
         }
+        applyRequested();
         plannerThread_ = std::this_thread::get_id();
 
         long long delta[4] = {0, 0, 0, 0};

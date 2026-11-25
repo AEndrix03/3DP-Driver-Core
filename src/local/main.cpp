@@ -165,6 +165,7 @@ namespace {
                 raw = native;
             }
             if (raw) port_ = wire_ = std::make_shared<local::WirePort>(raw);
+            if (wire_ && simulated_) wire_->setTimeScale(local::simSpeed());
         }
 
         bool start(std::string &error) {
@@ -310,6 +311,9 @@ namespace {
                 << ",\"speed\":" << number(moving ? wire.speed : 0.0, 2)
                 << ",\"acceleration\":" << number(moving ? wire.acceleration : 0.0, 0)
                 // inviati e non ancora eseguiti: quelli nella coda della scheda piu' quelli ancora in viaggio
+                // strada percorsa dall'inizio del lavoro: dice a che punto del percorso si e', anche
+                // quando il percorso ripassa piu' volte sugli stessi punti
+                << ",\"travelled\":" << number(wire.travelled - jobTravelled_, 2)
                 << ",\"queued\":" << wire.queued << ",\"queueSize\":"
                 << limits.queueBlocks + static_cast<int>(core::CommandExecutor::WINDOW_FRAMES)
                 << ",\"link\":{\"framesTx\":" << wire.framesTx << ",\"acksRx\":" << wire.acksRx
@@ -388,6 +392,7 @@ namespace {
                 if (!simulated_) return reply(false, "not a simulated printer");
                 if (!speed || *speed <= 0.0) return reply(false, "missing s=<time scale>");
                 local::simSetSpeed(*speed);
+                wire_->setTimeScale(local::simSpeed());
                 return reply(true, "simulation speed set");
             }
             if (name == "upload") return upload(params, body);
@@ -463,6 +468,7 @@ namespace {
 
         bool activeTest_ = false;
         local::SlicerSetup slicer_;
+        std::atomic<double> jobTravelled_{0.0}; ///< strada gia' percorsa quando il lavoro e' partito
         uint64_t jobResent_ = 0, jobErrors_ = 0, jobFrames_ = 0; ///< contatori del collegamento a inizio lavoro
         std::string activeJob_, activeName_, activePath_, faultText_, lastResult_;
         std::time_t activeStart_ = 0;
@@ -839,6 +845,7 @@ namespace {
                 jobResent_ = wire.resent;
                 jobErrors_ = wire.errors;
                 jobFrames_ = wire.framesTx;
+                jobTravelled_ = wire.travelled;
                 activeJob_ = record.jobId;
                 activeName_ = record.name;
                 activePath_ = std::filesystem::path(runPath).generic_string();

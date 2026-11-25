@@ -29,10 +29,16 @@ namespace core::print {
 
             // Ultimo comando eseguito: il firmware torna Idle, pronto per il job successivo
             commandQueue_->setJobFinishedCallback([this](const std::string &jobId) {
+                {
+                    std::lock_guard<std::mutex> lock(stateMutex_);
+                    if (jobId.empty() || jobId != currentJobId_) return;
+                    if (currentState_ != JobState::RUNNING) return;
+                }
+                // Attende la fine dei movimenti in coda sul firmware: anche molti secondi. Senza il
+                // lucchetto, cosi' nel frattempo pausa, annullamento e lettura dello stato funzionano.
+                driver_->system()->endPrint();
                 std::lock_guard<std::mutex> lock(stateMutex_);
-                if (jobId.empty() || jobId != currentJobId_) return;
-                if (currentState_ != JobState::RUNNING) return;
-                driver_->system()->endPrint(); // attende la fine dei movimenti in coda sul firmware
+                if (jobId != currentJobId_ || currentState_ != JobState::RUNNING) return; // annullato nel frattempo
                 JobCheckpoint::remove(jobId);
                 updateState(JobState::COMPLETED);
                 Logger::logInfo("[PrintJobManager] Job completed: " + jobId);
@@ -373,8 +379,7 @@ namespace core::print {
     }
 
     JobState PrintJobManager::getCurrentState() const {
-        std::lock_guard<std::mutex> lock(stateMutex_);
-        return currentState_;
+        return publishedState_.load();
     }
 
     bool PrintJobManager::isReadyToPrint() const {
@@ -430,6 +435,7 @@ namespace core::print {
         if (currentState_ != newState) {
             JobState oldState = currentState_;
             currentState_ = newState;
+            publishedState_ = newState;
 
             Logger::logInfo(
                     "[PrintJobManager] State change: " + stateToString(oldState) + " -> " + stateToString(newState));

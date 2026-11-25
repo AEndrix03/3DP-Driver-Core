@@ -1926,6 +1926,55 @@ static void testEndGCodeAndCheckpointFile() {
     CHECK(!core::print::JobCheckpoint::load(saved.jobId).has_value());
 }
 
+static void testReadableWhileMoving() {
+    // Un lavoro di pochi movimenti lunghi: le righe finiscono subito, la macchina lavora ancora
+    // per secondi. In quel tempo chi legge (la pagina) e chi regola non deve restare in attesa.
+    prepareMachine();
+    sim::setTimeScale(1.0);
+    std::filesystem::create_directories("gcode");
+    const std::string path = "gcode/long_moves.gcode";
+    {
+        std::ofstream out(path);
+        out << "G28\nG90\n";
+        for (int i = 0; i < 3; ++i) out << "G1 X60 F2400\nG1 X2\n"; // 1,5 s circa l'uno; X0 e' il finecorsa
+    }
+    JobRig rig;
+    CHECK(rig.manager->startPrintJob(path, "job-long"));
+    CHECK(waitFor([&] { return sim::steps().x > 800; }, 20s)); // homing fatto, primo movimento in corso
+    std::this_thread::sleep_for(400ms);
+
+    const auto slow = [](const std::function<void()> &call) {
+        const auto start = std::chrono::steady_clock::now();
+        call();
+        return std::chrono::steady_clock::now() - start > 100ms;
+    };
+    int stalls = 0;
+    const long before = sim::steps().x;
+    for (int i = 0; i < 20; ++i) {
+        if (slow([&] { rig.manager->getCurrentState(); })) ++stalls;
+        if (slow([&] { driver->motion()->linearAdvance(); })) ++stalls;
+        if (slow([&] { driver->motion()->plannerLimits(); })) ++stalls;
+        if (slow([&] { driver->motion()->sentPosition(); })) ++stalls;
+        if (slow([&] { driver->motion()->setSpeedFactor(1.0); })) ++stalls;
+        if (slow([&] { rig.queue->getQueueSize(); })) ++stalls;
+        std::this_thread::sleep_for(100ms);
+    }
+    CHECK_MSG(stalls == 0, std::to_string(stalls) + " calls waited more than 100 ms");
+    CHECK(sim::steps().x != before);                                  // nel frattempo la macchina si muoveva
+    CHECK(rig.manager->getCurrentState() == core::print::JobState::RUNNING); // non e' "finito" prima di fermarsi
+    if (rig.manager->getCurrentState() != core::print::JobState::RUNNING) {
+        std::printf("    fault: %s\n", driver->lastFaultReason().c_str());
+        for (const auto &l: driver->system()->errorStatus().body) std::printf("    err: %s\n", l.c_str());
+        for (const auto &l: driver->system()->diagnostics().body) std::printf("    diag: %s\n", l.c_str());
+    }
+
+    CHECK(rig.waitState(core::print::JobState::COMPLETED, 30s));
+    CHECK(idle());
+    CHECK_MSG(sim::steps().x == -800 + 160, "x=" + std::to_string(sim::steps().x)); // tornato a X2
+    std::error_code ec;
+    std::filesystem::remove_all(core::print::JobCheckpoint::directory(), ec);
+}
+
 static void testCancelJob() {
     prepareMachine();
     const std::string path = writePrintFile();
@@ -2005,6 +2054,7 @@ int main(int argc, char **argv) {
             {"recover after firmware reboot",      testRecoverAfterFirmwareReboot},
             {"end g-code and checkpoint file",     testEndGCodeAndCheckpointFile},
             {"cancel job",                         testCancelJob},
+            {"state readable while moving",        testReadableWhileMoving},
     };
 
     for (const auto &[name, test]: tests) {

@@ -146,6 +146,19 @@ namespace core::command::motion {
         bool hasCaps_ = false;
         MachineInfo info_;
         std::chrono::steady_clock::time_point nextBlockAt_{};
+        /// Regolazioni chieste dall'operatore o dal G-code: chi le imposta o le legge non attende mai
+        /// un movimento in corso; il piano le prende al movimento successivo.
+        struct Requested {
+            double speedFactor = 1.0, blockRate = 0.0, accelPrint = 0.0, accelTravel = 0.0, advance = 0.0;
+            bool dirty = false;
+        };
+        std::mutex requestedMutex_;
+        Requested requested_;
+        planning::MachineLimits effective_; ///< limiti con cui si pianifica (copia, sotto sentMutex_)
+
+        /// Porta nel piano le regolazioni in attesa. Da chiamare con mirrorMutex_ preso.
+        void applyRequested();
+
         std::mutex sentMutex_; ///< a parte: chi legge non deve attendere un movimento in corso
         SentPosition sent_;
         planning::MotionPlanner planner_;
